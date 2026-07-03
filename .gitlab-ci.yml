@@ -21,7 +21,11 @@ cache:
     - $BUILD_DIR/_deps/
 
 .macos:
-  # Runner has "Run untagged jobs" enabled, so no tag filter is needed.
+  # Pin to the self-hosted macOS runner. The runner must carry the `macos`
+  # tag, otherwise untagged jobs leak onto GitLab's shared Linux runners
+  # (where brew/clang/dylib don't exist) and fail.
+  tags:
+    - macos
   before_script:
     # Runners ship with Homebrew; ensure CMake is present. curl is provided by
     # the system SDK, so libcurl's find_package resolves without extra installs.
