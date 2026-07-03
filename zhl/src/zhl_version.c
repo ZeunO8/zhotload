@@ -40,12 +40,9 @@ zhl_status_t zhl_version_parse(const char *str, zhl_version_t *out)
     if (!str || !out) return ZHL_ERR_NULL_PARAM;
     if (str[0] == '\0') return ZHL_ERR_EMPTY_STRING;
 
-    unsigned int major = 0, minor = 0, patch = 0;
-    char trailing = '\0';
-
-    int n = sscanf(str, "%u.%u.%u%c", &major, &minor, &patch, &trailing);
-    if (n != 3) return ZHL_ERR_INVALID_VERSION;
-
+    /* Reject anything that is not a run of digits and dots (spaces, alpha,
+     * signs). This is checked up front so the sscanf below only has to worry
+     * about the plane count, not stray characters. */
     const char *p = str;
     while (*p) {
         if (*p != '.' && !isdigit((unsigned char)*p)) {
@@ -54,9 +51,19 @@ zhl_status_t zhl_version_parse(const char *str, zhl_version_t *out)
         p++;
     }
 
+    /* Accept three planes (major.minor.patch) or four (…​.tweak); the tweak
+     * plane is optional and defaults to 0. The trailing %c catches a fifth
+     * plane (or any leftover separator) so "1.2.3.4.5" is rejected. */
+    unsigned int major = 0, minor = 0, patch = 0, tweak = 0;
+    char trailing = '\0';
+
+    int n = sscanf(str, "%u.%u.%u.%u%c", &major, &minor, &patch, &tweak, &trailing);
+    if (n < 3 || n == 5) return ZHL_ERR_INVALID_VERSION;
+
     out->major = major;
     out->minor = minor;
     out->patch = patch;
+    out->tweak = (n >= 4) ? tweak : 0u;
     return ZHL_OK;
 }
 
@@ -70,5 +77,7 @@ zhl_cmp_t zhl_version_compare(const zhl_version_t *a, const zhl_version_t *b)
     if (a->minor > b->minor) return ZHL_CMP_GREATER;
     if (a->patch < b->patch) return ZHL_CMP_LESS;
     if (a->patch > b->patch) return ZHL_CMP_GREATER;
+    if (a->tweak < b->tweak) return ZHL_CMP_LESS;
+    if (a->tweak > b->tweak) return ZHL_CMP_GREATER;
     return ZHL_CMP_EQUAL;
 }

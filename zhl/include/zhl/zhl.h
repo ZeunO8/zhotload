@@ -97,11 +97,12 @@ typedef enum zhl_status {
 /*  Version types                                                      */
 /* ------------------------------------------------------------------ */
 
-/** Parsed semantic version (major.minor.patch). */
+/** Parsed semantic version (major.minor.patch[.tweak]). */
 typedef struct zhl_version {
     uint32_t major;
     uint32_t minor;
     uint32_t patch;
+    uint32_t tweak;   /**< Optional 4th plane; 0 when absent from the string. */
 } zhl_version_t;
 
 /** Result of comparing two versions. */
@@ -377,7 +378,9 @@ uint32_t zhl_version_patch(void);
 uint32_t zhl_version_tweak(void);
 
 /**
- * Parse a "major.minor.patch" string into a zhl_version_t.
+ * Parse a "major.minor.patch" or "major.minor.patch.tweak" string into a
+ * zhl_version_t. The 4th (tweak) plane is optional and defaults to 0 when
+ * absent; projects that version in four planes (e.g. "1.10.0.0") are accepted.
  *
  * @return ZHL_OK on success, ZHL_ERR_NULL_PARAM, ZHL_ERR_EMPTY_STRING,
  *         or ZHL_ERR_INVALID_VERSION.

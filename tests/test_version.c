@@ -93,10 +93,30 @@ static void test_parse_malformed_one_dot(void)
     TEST_ASSERT_EQ(zhl_version_parse("1.2", &v), ZHL_ERR_INVALID_VERSION);
 }
 
-static void test_parse_malformed_trailing(void)
+static void test_parse_four_plane(void)
+{
+    /* 4-plane versions (major.minor.patch.tweak) are accepted; the tweak plane
+     * is captured. Projects like GDZ/QUANTIX version this way (e.g. 1.10.0.0). */
+    zhl_version_t v;
+    TEST_ASSERT_EQ(zhl_version_parse("1.2.3.4", &v), ZHL_OK);
+    TEST_ASSERT_EQ(v.major, 1u);
+    TEST_ASSERT_EQ(v.minor, 2u);
+    TEST_ASSERT_EQ(v.patch, 3u);
+    TEST_ASSERT_EQ(v.tweak, 4u);
+}
+
+static void test_parse_three_plane_zero_tweak(void)
+{
+    /* Absent tweak plane defaults to 0. */
+    zhl_version_t v;
+    TEST_ASSERT_EQ(zhl_version_parse("1.2.3", &v), ZHL_OK);
+    TEST_ASSERT_EQ(v.tweak, 0u);
+}
+
+static void test_parse_malformed_five_plane(void)
 {
     zhl_version_t v;
-    TEST_ASSERT_EQ(zhl_version_parse("1.2.3.4", &v), ZHL_ERR_INVALID_VERSION);
+    TEST_ASSERT_EQ(zhl_version_parse("1.2.3.4.5", &v), ZHL_ERR_INVALID_VERSION);
 }
 
 static void test_parse_malformed_alpha(void)
@@ -146,6 +166,16 @@ static void test_compare_patch_diff(void)
     TEST_ASSERT_EQ(zhl_version_compare(&a, &b), ZHL_CMP_GREATER);
 }
 
+static void test_compare_tweak_diff(void)
+{
+    /* A tweak-only bump (1.2.3.0 -> 1.2.3.1) must order as greater so a
+     * tweak-only release is still seen as an available update. */
+    zhl_version_t a = {1, 2, 3, 0};
+    zhl_version_t b = {1, 2, 3, 1};
+    TEST_ASSERT_EQ(zhl_version_compare(&a, &b), ZHL_CMP_LESS);
+    TEST_ASSERT_EQ(zhl_version_compare(&b, &a), ZHL_CMP_GREATER);
+}
+
 TEST_MAIN_BEGIN()
     RUN_TEST(test_zhl_version_string_not_null);
     RUN_TEST(test_zhl_version_string_value);
@@ -161,7 +191,9 @@ TEST_MAIN_BEGIN()
     RUN_TEST(test_parse_empty);
     RUN_TEST(test_parse_malformed_no_dots);
     RUN_TEST(test_parse_malformed_one_dot);
-    RUN_TEST(test_parse_malformed_trailing);
+    RUN_TEST(test_parse_four_plane);
+    RUN_TEST(test_parse_three_plane_zero_tweak);
+    RUN_TEST(test_parse_malformed_five_plane);
     RUN_TEST(test_parse_malformed_alpha);
     RUN_TEST(test_parse_malformed_spaces);
     RUN_TEST(test_compare_equal);
@@ -169,4 +201,5 @@ TEST_MAIN_BEGIN()
     RUN_TEST(test_compare_major_greater);
     RUN_TEST(test_compare_minor_diff);
     RUN_TEST(test_compare_patch_diff);
+    RUN_TEST(test_compare_tweak_diff);
 TEST_MAIN_END()

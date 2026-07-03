@@ -33,20 +33,27 @@ static char g_data_root[512] = DEFAULT_DATA_ROOT;
 /*  Version comparison for finding the latest version                  */
 /* ------------------------------------------------------------------ */
 
-static int parse_semver(const char *s, unsigned int *major, unsigned int *minor, unsigned int *patch)
+/* Parse 3- or 4-plane versions (major.minor.patch[.tweak]); the tweak plane is
+ * optional and defaults to 0. Mirrors zhl_version_parse on the client so the
+ * server and clients agree on ordering (including tweak-only bumps). */
+static int parse_semver(const char *s, unsigned int *major, unsigned int *minor,
+                        unsigned int *patch, unsigned int *tweak)
 {
-    return sscanf(s, "%u.%u.%u", major, minor, patch) == 3;
+    *tweak = 0;
+    int n = sscanf(s, "%u.%u.%u.%u", major, minor, patch, tweak);
+    return n >= 3;
 }
 
 static int semver_cmp(const char *a, const char *b)
 {
-    unsigned int a_maj, a_min, a_pat, b_maj, b_min, b_pat;
-    if (!parse_semver(a, &a_maj, &a_min, &a_pat)) return 0;
-    if (!parse_semver(b, &b_maj, &b_min, &b_pat)) return 0;
+    unsigned int a_maj, a_min, a_pat, a_twk, b_maj, b_min, b_pat, b_twk;
+    if (!parse_semver(a, &a_maj, &a_min, &a_pat, &a_twk)) return 0;
+    if (!parse_semver(b, &b_maj, &b_min, &b_pat, &b_twk)) return 0;
 
     if (a_maj != b_maj) return (a_maj > b_maj) ? 1 : -1;
     if (a_min != b_min) return (a_min > b_min) ? 1 : -1;
     if (a_pat != b_pat) return (a_pat > b_pat) ? 1 : -1;
+    if (a_twk != b_twk) return (a_twk > b_twk) ? 1 : -1;
     return 0;
 }
 
@@ -56,8 +63,8 @@ static int semver_cmp(const char *a, const char *b)
 
 static int is_version_dir(const char *name)
 {
-    unsigned int maj, min, pat;
-    return parse_semver(name, &maj, &min, &pat) && name[0] != '.';
+    unsigned int maj, min, pat, twk;
+    return parse_semver(name, &maj, &min, &pat, &twk) && name[0] != '.';
 }
 
 static int find_latest_version(const char *app_dir, char *out, size_t out_len)
@@ -202,11 +209,17 @@ static void ev_handler(struct mg_connection *c, int ev, void *ev_data)
 
     char app_name[256] = {0};
     char version[64] = {0};
+    char tail = 0;
 
-    if (sscanf(uri, "/apps/%255[^/]/latest", app_name) == 1) {
-        handle_latest(c, app_name);
-    } else if (sscanf(uri, "/apps/%255[^/]/download/%63s", app_name, version) == 2) {
+    /* Check the more specific /download/{version} route first. sscanf reports
+     * the count of assigned fields *before* a trailing literal mismatch, so a
+     * "/download/…" URI would otherwise satisfy the "…/latest" pattern's single
+     * %[^/] conversion (count == 1) and misroute to handle_latest. The `%c`
+     * tail guard on /latest rejects any trailing characters after "/latest". */
+    if (sscanf(uri, "/apps/%255[^/]/download/%63s", app_name, version) == 2) {
         handle_download(c, app_name, version);
+    } else if (sscanf(uri, "/apps/%255[^/]/latest%c", app_name, &tail) == 1) {
+        handle_latest(c, app_name);
     } else {
         send_error(c, 404, "Not found");
     }
