@@ -37,7 +37,13 @@ include(FetchContent)
 
 # cJSON is a dependency of the zhl client itself, so it is always needed. Declared
 # unconditionally; FetchContent_MakeAvailable dedups by name if an embedder (or a
-# sibling dependency) already declared `cjson`.
+# sibling dependency) already declared `cjson`. Configure it lean: no shared lib,
+# no CLI utils, and crucially no test suite — cJSON otherwise registers ~13 tests
+# via add_test() that would leak into every embedder's ctest run.
+set(ENABLE_CJSON_TEST      OFF CACHE BOOL "" FORCE)
+set(ENABLE_CJSON_UTILS     OFF CACHE BOOL "" FORCE)
+set(CJSON_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS      OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
     cjson
     GIT_REPOSITORY https://github.com/DaveGamble/cJSON.git
