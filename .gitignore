@@ -2,7 +2,6 @@
 build/
 cmake-build-*/
 out/
-
 # CMake
 CMakeCache.txt
 CMakeFiles/
