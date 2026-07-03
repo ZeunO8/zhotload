@@ -21,8 +21,7 @@ cache:
     - $BUILD_DIR/_deps/
 
 .macos:
-  tags:
-    - macos
+  # Runner has "Run untagged jobs" enabled, so no tag filter is needed.
   before_script:
     # Runners ship with Homebrew; ensure CMake is present. curl is provided by
     # the system SDK, so libcurl's find_package resolves without extra installs.
