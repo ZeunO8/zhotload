@@ -19,7 +19,7 @@ add_library(zhl STATIC ${ZHL_SOURCES})
 target_include_directories(zhl
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_BINARY_DIR}/inc
+        ${PROJECT_BINARY_DIR}/inc
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
 )

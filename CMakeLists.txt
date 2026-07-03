@@ -13,12 +13,31 @@ endif()
 
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/version.h.in
-    ${CMAKE_BINARY_DIR}/inc/zhl/version.h
+    ${PROJECT_BINARY_DIR}/inc/zhl/version.h
     @ONLY
 )
 
+# ── Embedding detection ───────────────────────────────────────────────────────
+# zhl is meant to be vendored into other projects (QUANTIX, GDZ) via FetchContent
+# as a *client* library only. When embedded we build just `zhl` — the standalone
+# update server (zhs, which fetches mongoose) and the test suite (which builds
+# fixture .so's and registers ctest) would otherwise leak into the embedder's
+# build and ctest run. Mirror GDZ's top-level gate: default the server/tests ON
+# only when zhotload is the top-level project.
+if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+    set(ZHL_IS_TOP_LEVEL ON)
+else()
+    set(ZHL_IS_TOP_LEVEL OFF)
+endif()
+
+option(ZHL_BUILD_SERVER "Build the zhs update-server executable (fetches mongoose)" ${ZHL_IS_TOP_LEVEL})
+option(ZHL_BUILD_TESTS  "Build zhl test fixtures and register ctest"                ${ZHL_IS_TOP_LEVEL})
+
 include(FetchContent)
 
+# cJSON is a dependency of the zhl client itself, so it is always needed. Declared
+# unconditionally; FetchContent_MakeAvailable dedups by name if an embedder (or a
+# sibling dependency) already declared `cjson`.
 FetchContent_Declare(
     cjson
     GIT_REPOSITORY https://github.com/DaveGamble/cJSON.git
@@ -26,8 +45,13 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(cjson)
 
-enable_testing()
-
 add_subdirectory(zhl)
-add_subdirectory(zhs)
-add_subdirectory(tests)
+
+if(ZHL_BUILD_SERVER)
+    add_subdirectory(zhs)
+endif()
+
+if(ZHL_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
