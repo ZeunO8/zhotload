@@ -1,8 +1,8 @@
 # GitLab CI for zhotload — builds and tests on a macOS runner.
 #
-# By default this targets GitLab's hosted SaaS macOS runners (Apple silicon).
-# If you use a self-hosted macOS runner instead, change the `tags` below to
-# whatever tag your runner is registered with and remove the `image` line.
+# This targets a self-hosted macOS runner registered with the `macos` tag.
+# Register the runner with:  gitlab-runner register  (executor: shell)
+# and add `macos` to its tag list. See the README for full setup steps.
 
 stages:
   - build
@@ -22,8 +22,7 @@ cache:
 
 .macos:
   tags:
-    - saas-macos-medium-m1
-  image: macos-14-xcode-15
+    - macos
   before_script:
     # Runners ship with Homebrew; ensure CMake is present. curl is provided by
     # the system SDK, so libcurl's find_package resolves without extra installs.
