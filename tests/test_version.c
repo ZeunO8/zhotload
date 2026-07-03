@@ -13,22 +13,27 @@ static void test_zhl_version_string_not_null(void)
 
 static void test_zhl_version_string_value(void)
 {
-    TEST_ASSERT_STR_EQ(zhl_version_string(), "0.1.0");
+    TEST_ASSERT_STR_EQ(zhl_version_string(), ZHL_VERSION_STRING);
 }
 
 static void test_zhl_version_major(void)
 {
-    TEST_ASSERT_EQ(zhl_version_major(), 0u);
+    TEST_ASSERT_EQ(zhl_version_major(), ZHL_VERSION_MAJOR);
 }
 
 static void test_zhl_version_minor(void)
 {
-    TEST_ASSERT_EQ(zhl_version_minor(), 1u);
+    TEST_ASSERT_EQ(zhl_version_minor(), ZHL_VERSION_MINOR);
 }
 
 static void test_zhl_version_patch(void)
 {
-    TEST_ASSERT_EQ(zhl_version_patch(), 0u);
+    TEST_ASSERT_EQ(zhl_version_patch(), ZHL_VERSION_PATCH);
+}
+
+static void test_zhl_version_tweak(void)
+{
+    TEST_ASSERT_EQ(zhl_version_tweak(), ZHL_VERSION_TWEAK);
 }
 
 static void test_parse_valid(void)
