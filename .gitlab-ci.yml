@@ -35,7 +35,7 @@ build:macos:
   extends: .macos
   stage: build
   script:
-    - cmake -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
+    - cmake -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5
     - cmake --build "$BUILD_DIR" --parallel
   artifacts:
     # Hand the compiled tree to the test stage.
