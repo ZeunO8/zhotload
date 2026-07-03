@@ -1,0 +1,53 @@
+# GitLab CI for zhotload — builds and tests on a macOS runner.
+#
+# By default this targets GitLab's hosted SaaS macOS runners (Apple silicon).
+# If you use a self-hosted macOS runner instead, change the `tags` below to
+# whatever tag your runner is registered with and remove the `image` line.
+
+stages:
+  - build
+  - test
+
+variables:
+  # Out-of-source build directory.
+  BUILD_DIR: build
+  # Keep CMake's FetchContent downloads (cJSON, mongoose) across jobs.
+  FF_USE_FASTZIP: "true"
+
+# Cache the fetched third-party sources so we don't re-clone every pipeline.
+cache:
+  key: "$CI_COMMIT_REF_SLUG-deps"
+  paths:
+    - $BUILD_DIR/_deps/
+
+.macos:
+  tags:
+    - saas-macos-medium-m1
+  image: macos-14-xcode-15
+  before_script:
+    # Runners ship with Homebrew; ensure CMake is present. curl is provided by
+    # the system SDK, so libcurl's find_package resolves without extra installs.
+    - export HOMEBREW_NO_AUTO_UPDATE=1
+    - command -v cmake >/dev/null 2>&1 || brew install cmake
+    - cmake --version
+    - cc --version
+
+build:macos:
+  extends: .macos
+  stage: build
+  script:
+    - cmake -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
+    - cmake --build "$BUILD_DIR" --parallel
+  artifacts:
+    # Hand the compiled tree to the test stage.
+    paths:
+      - $BUILD_DIR/
+    expire_in: 1 hour
+
+test:macos:
+  extends: .macos
+  stage: test
+  needs:
+    - build:macos
+  script:
+    - ctest --test-dir "$BUILD_DIR" --output-on-failure
