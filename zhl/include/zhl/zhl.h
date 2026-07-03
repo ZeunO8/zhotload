@@ -373,6 +373,9 @@ uint32_t zhl_version_minor(void);
 /** Return zhl's own patch version number. */
 uint32_t zhl_version_patch(void);
 
+/** Return zhl's own tweak version number. */
+uint32_t zhl_version_tweak(void);
+
 /**
  * Parse a "major.minor.patch" string into a zhl_version_t.
  *

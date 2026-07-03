@@ -5,6 +5,7 @@
 
 #include "test_harness.h"
 #include <zhl/zhl.h>
+#include <zhl/version.h>
 
 static void test_zhl_version_string_not_null(void)
 {
@@ -151,6 +152,7 @@ TEST_MAIN_BEGIN()
     RUN_TEST(test_zhl_version_major);
     RUN_TEST(test_zhl_version_minor);
     RUN_TEST(test_zhl_version_patch);
+    RUN_TEST(test_zhl_version_tweak);
     RUN_TEST(test_parse_valid);
     RUN_TEST(test_parse_zeros);
     RUN_TEST(test_parse_large_numbers);

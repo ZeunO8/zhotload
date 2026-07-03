@@ -30,6 +30,11 @@ uint32_t zhl_version_patch(void)
     return ZHL_VERSION_PATCH;
 }
 
+uint32_t zhl_version_tweak(void)
+{
+    return ZHL_VERSION_TWEAK;
+}
+
 zhl_status_t zhl_version_parse(const char *str, zhl_version_t *out)
 {
     if (!str || !out) return ZHL_ERR_NULL_PARAM;
