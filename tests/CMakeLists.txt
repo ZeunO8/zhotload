@@ -37,7 +37,7 @@ function(zhl_add_test name source)
     add_executable(${name} ${source})
     target_link_libraries(${name} PRIVATE zhl cjson)
     target_include_directories(${name} PRIVATE
-        ${CMAKE_SOURCE_DIR}/zhl/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../zhl/src
     )
     target_compile_definitions(${name} PRIVATE
         FIXTURE_V1_PATH="${FIXTURE_DIR}/libfixture_v1.${FIXTURE_EXT}"
