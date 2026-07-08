@@ -30,8 +30,25 @@ else()
     set(ZHL_IS_TOP_LEVEL OFF)
 endif()
 
-option(ZHL_BUILD_SERVER "Build the zhs update-server executable (fetches mongoose)" ${ZHL_IS_TOP_LEVEL})
-option(ZHL_BUILD_TESTS  "Build zhl test fixtures and register ctest"                ${ZHL_IS_TOP_LEVEL})
+# iOS/tvOS/watchOS are cross-compiled, embedded targets: the update server is a
+# host-side executable and the test suite loads fixture .so's and runs ctest,
+# neither of which applies on-device. Only `zhl` (the client library) is built
+# there, regardless of the top-level gate above.
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS"
+        OR CMAKE_SYSTEM_NAME STREQUAL "tvOS"
+        OR CMAKE_SYSTEM_NAME STREQUAL "watchOS")
+    set(ZHL_APPLE_EMBEDDED ON)
+else()
+    set(ZHL_APPLE_EMBEDDED OFF)
+endif()
+
+set(_zhl_tools_default OFF)
+if(ZHL_IS_TOP_LEVEL AND NOT ZHL_APPLE_EMBEDDED)
+    set(_zhl_tools_default ON)
+endif()
+
+option(ZHL_BUILD_SERVER "Build the zhs update-server executable (fetches mongoose)" ${_zhl_tools_default})
+option(ZHL_BUILD_TESTS  "Build zhl test fixtures and register ctest"                ${_zhl_tools_default})
 
 include(FetchContent)
 
@@ -49,7 +66,14 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/DaveGamble/cJSON.git
     GIT_TAG        v1.7.18
 )
+message(STATUS "Fetching cJSON from GitHub...")
 FetchContent_MakeAvailable(cjson)
+
+FetchContent_Declare(
+    iostreams
+    GIT_REPOSITORY https://github.com/ZeunO8/iostreams.git
+    GIT_SHALLOW TRUE
+)
 
 add_subdirectory(zhl)
 

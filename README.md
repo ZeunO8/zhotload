@@ -22,7 +22,7 @@ zhotload/
 
 - CMake >= 3.14
 - C11 compiler (GCC, Clang, MSVC)
-- libcurl (for `zhl` HTTP client)
+- libcurl (for `zhl`'s HTTP client on desktop platforms — not needed on iOS)
 
 ## Build
 
@@ -30,6 +30,44 @@ zhotload/
 cmake -B build
 cmake --build build
 ctest --test-dir build
+```
+
+## iOS
+
+`zhl` builds as a static library for iOS and is meant to be linked into other
+iOS CMake projects. libcurl is not part of the iOS SDK, so on iOS/tvOS/watchOS
+the HTTP client transparently switches to a Foundation/NSURLSession backend
+(`ZHL_HTTP_BACKEND=apple`) — no third-party linkage required. `dlopen` is used
+for hotloading, exactly as on other POSIX platforms.
+
+Configure with the bundled toolchain (Xcode generator recommended):
+
+```sh
+# Device (arm64)
+cmake -B build-ios -G Xcode \
+      -DCMAKE_TOOLCHAIN_FILE=cmake/ios.toolchain.cmake
+cmake --build build-ios --config Release
+
+# Simulator (Apple silicon host — use SIMULATOR64 for Intel)
+cmake -B build-sim -G Xcode \
+      -DCMAKE_TOOLCHAIN_FILE=cmake/ios.toolchain.cmake \
+      -DZHL_IOS_PLATFORM=SIMULATORARM64
+cmake --build build-sim --config Release
+```
+
+`ZHL_IOS_PLATFORM` accepts `OS64` (device, default), `SIMULATOR64` (x86_64), or
+`SIMULATORARM64`; `DEPLOYMENT_TARGET` sets the minimum iOS version (default
+`13.0`). The update server and test suite are automatically excluded from
+iOS-family builds — only the `zhl` client library is produced.
+
+The library links `Foundation`; embedders that consume it must do the same. When
+vendoring via `FetchContent`, just link the `zhl` target and its usage
+requirements propagate:
+
+```cmake
+FetchContent_Declare(zhotload GIT_REPOSITORY <url> GIT_TAG <tag>)
+FetchContent_MakeAvailable(zhotload)
+target_link_libraries(my_ios_app PRIVATE zhl)
 ```
 
 ## Quick-Start Example
@@ -104,8 +142,9 @@ See `zhs/README.md` for the data directory layout and how to register applicatio
 
 ## Dependencies
 
-| Library  | Used by | Fetch method  | Purpose                        |
-|----------|---------|---------------|--------------------------------|
-| libcurl  | zhl     | `find_package`| HTTP client for update checks  |
-| cJSON    | zhl,zhs| `FetchContent`| JSON parsing/generation        |
-| mongoose | zhs     | `FetchContent`| Embeddable HTTP server         |
+| Library      | Used by  | Fetch method   | Purpose                              |
+|--------------|----------|----------------|--------------------------------------|
+| libcurl      | zhl      | `find_package` | HTTP client (desktop backend)        |
+| Foundation   | zhl      | system framework | HTTP client (iOS/tvOS/watchOS backend) |
+| cJSON        | zhl, zhs | `FetchContent` | JSON parsing/generation              |
+| mongoose     | zhs      | `FetchContent` | Embeddable HTTP server               |
