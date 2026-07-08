@@ -22,7 +22,8 @@ zhotload/
 
 - CMake >= 3.14
 - C11 compiler (GCC, Clang, MSVC)
-- libcurl (for `zhl`'s HTTP client on desktop platforms — not needed on iOS)
+- libcurl (for `zhl`'s HTTP client on desktop platforms — not needed on iOS or Android)
+- Android NDK (for Android builds; installed via Android Studio's SDK Manager)
 
 ## Build
 
@@ -68,6 +69,66 @@ requirements propagate:
 FetchContent_Declare(zhotload GIT_REPOSITORY <url> GIT_TAG <tag>)
 FetchContent_MakeAvailable(zhotload)
 target_link_libraries(my_ios_app PRIVATE zhl)
+```
+
+## Android
+
+`zhl` builds as a static library for Android via the NDK and is meant to be
+linked into an app's JNI shared library. libcurl is not part of the NDK, so on
+Android the HTTP client switches to a JNI backend built on
+`java.net.HttpURLConnection` (`ZHL_HTTP_BACKEND=android`) — always present on
+every device, no third-party linkage. `dlopen` is used for hotloading, exactly
+as on other POSIX platforms.
+
+Configure with the bundled toolchain, which wraps the NDK's own toolchain and
+auto-detects the NDK from `ANDROID_NDK_HOME` or the Android Studio SDK location:
+
+```sh
+# arm64 device (default ABI + API 24)
+cmake -B build-android \
+      -DCMAKE_TOOLCHAIN_FILE=cmake/android.toolchain.cmake
+cmake --build build-android
+
+# other ABIs / API level
+cmake -B build-android-x86 \
+      -DCMAKE_TOOLCHAIN_FILE=cmake/android.toolchain.cmake \
+      -DANDROID_ABI=x86_64 -DANDROID_PLATFORM=android-26
+cmake --build build-android-x86
+```
+
+`ANDROID_ABI` accepts `arm64-v8a` (default), `armeabi-v7a`, `x86_64`, or `x86`;
+`ANDROID_PLATFORM` sets the minimum API level (default `android-24`). If the NDK
+is not on a standard path, pass `-DANDROID_NDK=/path/to/ndk`. The update server
+and test suite are automatically excluded from Android builds — only the `zhl`
+client library is produced.
+
+Because a static library cannot own `JNI_OnLoad`, the embedding app must hand
+zhl the process `JavaVM` once at startup, typically straight from its own
+`JNI_OnLoad`:
+
+```c
+#include <zhl/zhl.h>
+
+JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved)
+{
+    zhl_android_init(vm);          /* required before any update/download call */
+    return JNI_VERSION_1_6;
+}
+```
+
+The app also needs the `INTERNET` permission in its manifest, and downloaded
+`.so` files must be staged in the app's own writable data directory and opened
+by absolute path (`dlopen` of app-private files works from API 24 onward). Note
+that Google Play policy forbids downloading executable code for Play-distributed
+apps; this backend is intended for sideloaded, enterprise, or internal builds.
+
+When vendoring via `FetchContent`, link the `zhl` target and its usage
+requirements propagate:
+
+```cmake
+FetchContent_Declare(zhotload GIT_REPOSITORY <url> GIT_TAG <tag>)
+FetchContent_MakeAvailable(zhotload)
+target_link_libraries(my_android_lib PRIVATE zhl)
 ```
 
 ## Quick-Start Example
@@ -146,5 +207,6 @@ See `zhs/README.md` for the data directory layout and how to register applicatio
 |--------------|----------|----------------|--------------------------------------|
 | libcurl      | zhl      | `find_package` | HTTP client (desktop backend)        |
 | Foundation   | zhl      | system framework | HTTP client (iOS/tvOS/watchOS backend) |
+| HttpURLConnection | zhl | Android framework (JNI) | HTTP client (Android backend)    |
 | cJSON        | zhl, zhs | `FetchContent` | JSON parsing/generation              |
 | mongoose     | zhs      | `FetchContent` | Embeddable HTTP server               |

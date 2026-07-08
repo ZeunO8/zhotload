@@ -30,10 +30,10 @@ else()
     set(ZHL_IS_TOP_LEVEL OFF)
 endif()
 
-# iOS/tvOS/watchOS are cross-compiled, embedded targets: the update server is a
-# host-side executable and the test suite loads fixture .so's and runs ctest,
-# neither of which applies on-device. Only `zhl` (the client library) is built
-# there, regardless of the top-level gate above.
+# iOS/tvOS/watchOS and Android are cross-compiled, embedded targets: the update
+# server is a host-side executable and the test suite loads fixture .so's and
+# runs ctest, neither of which applies on-device. Only `zhl` (the client
+# library) is built there, regardless of the top-level gate above.
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS"
         OR CMAKE_SYSTEM_NAME STREQUAL "tvOS"
         OR CMAKE_SYSTEM_NAME STREQUAL "watchOS")
@@ -42,8 +42,15 @@ else()
     set(ZHL_APPLE_EMBEDDED OFF)
 endif()
 
+# CMake sets ANDROID when configured with the NDK toolchain.
+if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android")
+    set(ZHL_ANDROID_EMBEDDED ON)
+else()
+    set(ZHL_ANDROID_EMBEDDED OFF)
+endif()
+
 set(_zhl_tools_default OFF)
-if(ZHL_IS_TOP_LEVEL AND NOT ZHL_APPLE_EMBEDDED)
+if(ZHL_IS_TOP_LEVEL AND NOT ZHL_APPLE_EMBEDDED AND NOT ZHL_ANDROID_EMBEDDED)
     set(_zhl_tools_default ON)
 endif()
 

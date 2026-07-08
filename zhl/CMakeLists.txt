@@ -1,20 +1,24 @@
 # ── HTTP backend selection ────────────────────────────────────────────────────
 # libcurl is the default HTTP client on desktop platforms (macOS, Linux,
-# Windows). It is not part of the iOS/tvOS/watchOS SDKs, however, so on those
-# platforms the client uses a Foundation/NSURLSession backend instead — no
-# third-party linkage, ships with every Apple device. Callers can override the
-# auto-detected default with -DZHL_HTTP_BACKEND=curl|apple.
+# Windows). It is not part of the iOS/tvOS/watchOS SDKs, so on those platforms
+# the client uses a Foundation/NSURLSession backend; and it is not part of the
+# Android NDK either, so on Android it uses a JNI/HttpURLConnection backend.
+# Both platform backends ship with every device and need no third-party linkage.
+# Callers can override the auto-detected default with
+# -DZHL_HTTP_BACKEND=curl|apple|android.
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS"
         OR CMAKE_SYSTEM_NAME STREQUAL "tvOS"
         OR CMAKE_SYSTEM_NAME STREQUAL "watchOS")
     set(_zhl_default_backend apple)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Android")
+    set(_zhl_default_backend android)
 else()
     set(_zhl_default_backend curl)
 endif()
 
 set(ZHL_HTTP_BACKEND "${_zhl_default_backend}"
-    CACHE STRING "HTTP client backend: 'curl' (libcurl) or 'apple' (NSURLSession)")
-set_property(CACHE ZHL_HTTP_BACKEND PROPERTY STRINGS curl apple)
+    CACHE STRING "HTTP client backend: 'curl' (libcurl), 'apple' (NSURLSession), or 'android' (HttpURLConnection)")
+set_property(CACHE ZHL_HTTP_BACKEND PROPERTY STRINGS curl apple android)
 
 set(ZHL_SOURCES
     src/zhl_ctx.c
@@ -29,14 +33,19 @@ if(ZHL_HTTP_BACKEND STREQUAL "apple")
     endif()
     enable_language(OBJC)
     list(APPEND ZHL_SOURCES src/zhl_http_apple.m)
+elseif(ZHL_HTTP_BACKEND STREQUAL "android")
+    if(NOT ANDROID)
+        message(FATAL_ERROR "ZHL_HTTP_BACKEND=android requires the Android NDK toolchain")
+    endif()
+    list(APPEND ZHL_SOURCES src/zhl_http_android.c)
 elseif(ZHL_HTTP_BACKEND STREQUAL "curl")
     list(APPEND ZHL_SOURCES src/zhl_http_curl.c)
 else()
-    message(FATAL_ERROR "Unknown ZHL_HTTP_BACKEND '${ZHL_HTTP_BACKEND}' (expected: curl, apple)")
+    message(FATAL_ERROR "Unknown ZHL_HTTP_BACKEND '${ZHL_HTTP_BACKEND}' (expected: curl, apple, android)")
 endif()
 
-# dlopen/dlsym is available in the iOS SDK too, so the POSIX loader covers every
-# non-Windows platform including Apple embedded devices.
+# dlopen/dlsym is available in the iOS SDK and the Android NDK too, so the POSIX
+# loader covers every non-Windows platform including Apple and Android devices.
 if(WIN32)
     list(APPEND ZHL_SOURCES src/zhl_dl_win32.c)
 else()
@@ -60,6 +69,9 @@ if(ZHL_HTTP_BACKEND STREQUAL "apple")
     set_source_files_properties(src/zhl_http_apple.m
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(zhl PRIVATE "-framework Foundation")
+elseif(ZHL_HTTP_BACKEND STREQUAL "android")
+    # No link step: JNI calls dispatch through the JavaVM/JNIEnv function tables,
+    # and <jni.h> ships in the NDK sysroot, so the backend needs no import library.
 else()
     find_package(CURL REQUIRED)
     target_link_libraries(zhl PRIVATE CURL::libcurl)

@@ -410,6 +410,37 @@ zhl_cmp_t zhl_version_compare(const zhl_version_t *a,
 zhl_status_t zhl_ctx_get_active_version(const zhl_ctx_t ctx,
                                         const char     **out);
 
+/* ------------------------------------------------------------------ */
+/*  Android integration                                                */
+/* ------------------------------------------------------------------ */
+
+#ifdef __ANDROID__
+#include <jni.h>
+
+/**
+ * Hand zhl the process JavaVM (Android only).
+ *
+ * On Android the HTTP backend speaks through java.net.HttpURLConnection over
+ * JNI (libcurl is not part of the NDK), which requires a JavaVM. Because zhl is
+ * a static library it cannot own JNI_OnLoad, so the embedding app must forward
+ * the VM once at startup — typically straight from its own JNI_OnLoad:
+ *
+ * @code
+ *   JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {
+ *       zhl_android_init(vm);
+ *       return JNI_VERSION_1_6;
+ *   }
+ * @endcode
+ *
+ * Must be called before zhl_check_for_update() or zhl_download_update();
+ * otherwise those return ZHL_ERR_NOT_CONFIGURED. The VM pointer is process-wide
+ * and stable, so a single call is sufficient.
+ *
+ * @return ZHL_OK, or ZHL_ERR_NULL_PARAM if @p vm is NULL.
+ */
+zhl_status_t zhl_android_init(JavaVM *vm);
+#endif /* __ANDROID__ */
+
 #ifdef __cplusplus
 }
 #endif
