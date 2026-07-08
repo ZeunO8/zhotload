@@ -53,6 +53,7 @@ else()
 endif()
 
 add_library(zhl STATIC ${ZHL_SOURCES})
+zhl_compile_options(zhl)
 
 target_include_directories(zhl
     PUBLIC

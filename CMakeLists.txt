@@ -5,11 +5,16 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
-if(MSVC)
-    add_compile_options(/W4)
-else()
-    add_compile_options(-Wall -Wextra -Wpedantic)
-endif()
+# Warning flags are applied per target (not via directory-wide
+# add_compile_options) so they never leak into fetched third-party targets
+# (cjson, zcio) or an embedder's build. Call on every target zhotload creates.
+function(zhl_compile_options target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /w)
+    else()
+        target_compile_options(${target} PRIVATE -w)
+    endif()
+endfunction()
 
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/version.h.in

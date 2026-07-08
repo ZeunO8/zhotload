@@ -22,6 +22,7 @@ FetchContent_MakeAvailable(mongoose)
 add_library(mongoose_lib STATIC
     ${mongoose_SOURCE_DIR}/mongoose.c
 )
+zhl_compile_options(mongoose_lib)
 target_include_directories(mongoose_lib PUBLIC ${mongoose_SOURCE_DIR})
 
 if(WIN32)
@@ -29,6 +30,7 @@ if(WIN32)
 endif()
 
 add_executable(zhs src/main.c)
+zhl_compile_options(zhs)
 
 target_link_libraries(zhs PRIVATE mongoose_lib cjson)
 

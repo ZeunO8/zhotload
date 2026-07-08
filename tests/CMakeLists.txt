@@ -1,6 +1,7 @@
 # Test fixtures — shared libraries used to exercise the hotload mechanism.
 
 add_library(fixture_v1 SHARED fixtures/fixture_v1.c)
+zhl_compile_options(fixture_v1)
 target_link_libraries(fixture_v1 PRIVATE zhl)
 set_target_properties(fixture_v1 PROPERTIES
     PREFIX "lib"
@@ -8,6 +9,7 @@ set_target_properties(fixture_v1 PROPERTIES
 )
 
 add_library(fixture_v2 SHARED fixtures/fixture_v2.c)
+zhl_compile_options(fixture_v2)
 target_link_libraries(fixture_v2 PRIVATE zhl)
 set_target_properties(fixture_v2 PROPERTIES
     PREFIX "lib"
@@ -15,6 +17,7 @@ set_target_properties(fixture_v2 PROPERTIES
 )
 
 add_library(fixture_bad SHARED fixtures/fixture_bad.c)
+zhl_compile_options(fixture_bad)
 target_link_libraries(fixture_bad PRIVATE zhl)
 set_target_properties(fixture_bad PROPERTIES
     PREFIX "lib"
@@ -35,6 +38,7 @@ set(FIXTURE_DIR ${CMAKE_BINARY_DIR}/tests)
 # Helper to add a test executable with the fixture paths baked in.
 function(zhl_add_test name source)
     add_executable(${name} ${source})
+    zhl_compile_options(${name})
     target_link_libraries(${name} PRIVATE zhl cjson)
     target_include_directories(${name} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../zhl/src
