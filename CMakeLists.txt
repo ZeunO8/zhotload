@@ -76,11 +76,13 @@ FetchContent_Declare(
 message(STATUS "Fetching cJSON from GitHub...")
 FetchContent_MakeAvailable(cjson)
 
-FetchContent_Declare(
-    iostreams
-    GIT_REPOSITORY https://github.com/ZeunO8/iostreams.git
+FetchContent_Declare(zcio
+    GIT_REPOSITORY https://github.com/ZeunO8/zcio.git
     GIT_SHALLOW TRUE
+    GIT_TAG v1.0.9.0
 )
+message(STATUS "Fetching zcio from GitHub...")
+FetchContent_MakeAvailable(zcio)
 
 add_subdirectory(zhl)
 
