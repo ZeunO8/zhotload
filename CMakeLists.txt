@@ -1,7 +1,7 @@
 # 3.21: zcio's own floor — FetchContent-configuring it fails on anything older,
 # so declaring less here would only defer the error.
 cmake_minimum_required(VERSION 3.21)
-project(zhotload VERSION 0.5.2.0 LANGUAGES C)
+project(zhotload VERSION 0.5.3.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
