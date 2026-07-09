@@ -3,17 +3,18 @@
  * @brief HTTP client implementation using Android's java.net.HttpURLConnection
  *        via JNI.
  *
- * Dependency choice: libcurl is not part of the Android NDK, so — mirroring the
- * iOS/NSURLSession backend — the Android client speaks HTTP through the
- * framework's own URL stack (java.net.HttpURLConnection), which ships with every
- * Android device and needs no third-party linkage. This is the default backend
- * whenever ZHL_HTTP_BACKEND=android (see zhl/CMakeLists.txt).
+ * Dependency choice: the desktop zcio backend's TLS rides OpenSSL, which the
+ * Android NDK doesn't ship, so — mirroring the iOS/NSURLSession backend — the
+ * Android client speaks HTTP through the framework's own URL stack
+ * (java.net.HttpURLConnection), which ships with every Android device, speaks
+ * https via the platform trust store, and needs no third-party linkage. This is
+ * the default backend whenever ZHL_HTTP_BACKEND=android (see zhl/CMakeLists.txt).
  *
  * JNI requires a JavaVM. A native static library cannot own JNI_OnLoad (that
  * belongs to the app's own .so), so the embedder hands us the VM once at startup
  * via zhl_android_init(), typically from its JNI_OnLoad. Each HTTP call attaches
  * the calling thread to the VM if needed, drives the request synchronously to
- * match the libcurl/NSURLSession contract, and detaches again.
+ * match the zcio/NSURLSession contract, and detaches again.
  */
 
 #include "zhl_http.h"

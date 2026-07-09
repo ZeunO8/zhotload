@@ -20,9 +20,11 @@ zhotload/
 
 ## Prerequisites
 
-- CMake >= 3.14
-- C11 compiler (GCC, Clang, MSVC)
-- libcurl (for `zhl`'s HTTP client on desktop platforms — not needed on iOS or Android)
+- CMake >= 3.21
+- C11 compiler (GCC, Clang, MSVC); the fetched zcio dependency builds as C23
+- OpenSSL development headers (optional — only needed for `https://` URLs with
+  the desktop zcio HTTP backend; without it zcio builds TLS-free and plain
+  `http://` still works)
 - Android NDK (for Android builds; installed via Android Studio's SDK Manager)
 
 ## Build
@@ -33,13 +35,46 @@ cmake --build build
 ctest --test-dir build
 ```
 
+### Running the test suite on iOS / Android
+
+Mobile builds exclude the tests by default, but the suite runs **on-target**
+through zcio's mobile test launchers (`adb` push-and-run for Android, `simctl
+spawn` for the iOS simulator) when opted in with `-DZHL_BUILD_TESTS=ON`. No
+device needs to be running: the launcher boots the best available
+emulator/simulator, creating one via `sdkmanager`/`avdmanager` or `simctl
+create` if none exists (set `ZCIO_NO_AUTOBOOT=1` to fail fast instead).
+
+```sh
+# Android
+cmake -B build-android-tests \
+      -DCMAKE_TOOLCHAIN_FILE=cmake/android.toolchain.cmake \
+      -DZHL_BUILD_TESTS=ON -DZHL_HTTP_BACKEND=zcio
+cmake --build build-android-tests
+ctest --test-dir build-android-tests --output-on-failure
+
+# iOS simulator
+cmake -B build-sim-tests \
+      -DCMAKE_TOOLCHAIN_FILE=cmake/ios.toolchain.cmake \
+      -DZHL_IOS_PLATFORM=SIMULATORARM64 -DZHL_BUILD_TESTS=ON
+cmake --build build-sim-tests
+ctest --test-dir build-sim-tests --output-on-failure
+```
+
+On Android the tests use the zcio HTTP backend: the shipped JNI backend
+dispatches through the app's `JavaVM`, which a bare adb-shell executable does
+not have. Everything else under test — context, versioning, `dlopen`
+hotloading against on-device fixture libraries, update/download flows — is
+the same code that ships. The iOS run uses the shipped NSURLSession backend
+as-is.
+
 ## iOS
 
 `zhl` builds as a static library for iOS and is meant to be linked into other
-iOS CMake projects. libcurl is not part of the iOS SDK, so on iOS/tvOS/watchOS
-the HTTP client transparently switches to a Foundation/NSURLSession backend
-(`ZHL_HTTP_BACKEND=apple`) — no third-party linkage required. `dlopen` is used
-for hotloading, exactly as on other POSIX platforms.
+iOS CMake projects. zcio's TLS backend (OpenSSL) is not part of the iOS SDK, so
+on iOS/tvOS/watchOS the HTTP client transparently switches to a
+Foundation/NSURLSession backend (`ZHL_HTTP_BACKEND=apple`), which speaks https
+against the system trust store — no third-party linkage required. `dlopen` is
+used for hotloading, exactly as on other POSIX platforms.
 
 Configure with the bundled toolchain (Xcode generator recommended):
 
@@ -74,11 +109,11 @@ target_link_libraries(my_ios_app PRIVATE zhl)
 ## Android
 
 `zhl` builds as a static library for Android via the NDK and is meant to be
-linked into an app's JNI shared library. libcurl is not part of the NDK, so on
-Android the HTTP client switches to a JNI backend built on
-`java.net.HttpURLConnection` (`ZHL_HTTP_BACKEND=android`) — always present on
-every device, no third-party linkage. `dlopen` is used for hotloading, exactly
-as on other POSIX platforms.
+linked into an app's JNI shared library. zcio's TLS backend (OpenSSL) is not
+part of the NDK, so on Android the HTTP client switches to a JNI backend built
+on `java.net.HttpURLConnection` (`ZHL_HTTP_BACKEND=android`) — always present
+on every device, https via the platform trust store, no third-party linkage.
+`dlopen` is used for hotloading, exactly as on other POSIX platforms.
 
 Configure with the bundled toolchain, which wraps the NDK's own toolchain and
 auto-detects the NDK from `ANDROID_NDK_HOME` or the Android Studio SDK location:
@@ -205,8 +240,8 @@ See `zhs/README.md` for the data directory layout and how to register applicatio
 
 | Library      | Used by  | Fetch method   | Purpose                              |
 |--------------|----------|----------------|--------------------------------------|
-| libcurl      | zhl      | `find_package` | HTTP client (desktop backend)        |
+| zcio         | zhl, zhs | `FetchContent` | HTTP client (desktop backend) + HTTP server |
 | Foundation   | zhl      | system framework | HTTP client (iOS/tvOS/watchOS backend) |
 | HttpURLConnection | zhl | Android framework (JNI) | HTTP client (Android backend)    |
-| cJSON        | zhl, zhs | `FetchContent` | JSON parsing/generation              |
-| mongoose     | zhs      | `FetchContent` | Embeddable HTTP server               |
+| cJSON        | zhl      | `FetchContent` | JSON parsing                         |
+| OpenSSL      | zcio     | `find_package` (optional) | TLS for `https://` on the desktop backend |

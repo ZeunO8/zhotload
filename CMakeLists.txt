@@ -1,4 +1,6 @@
-cmake_minimum_required(VERSION 3.14)
+# 3.21: zcio's own floor — FetchContent-configuring it fails on anything older,
+# so declaring less here would only defer the error.
+cmake_minimum_required(VERSION 3.21)
 project(zhotload VERSION 0.3.5.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
@@ -81,10 +83,13 @@ FetchContent_Declare(
 message(STATUS "Fetching cJSON from GitHub...")
 FetchContent_MakeAvailable(cjson)
 
+# Like cJSON above, keep zcio lean: its test suite would otherwise register
+# ~20 tests into this project's (and every embedder's) ctest run.
+set(ZCIO_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(zcio
     GIT_REPOSITORY https://github.com/ZeunO8/zcio.git
     GIT_SHALLOW TRUE
-    GIT_TAG v1.0.9.0
+    GIT_TAG v1.3.0.0
 )
 message(STATUS "Fetching zcio from GitHub...")
 FetchContent_MakeAvailable(zcio)

@@ -2,12 +2,13 @@
  * @file zhl_http_apple.m
  * @brief HTTP client implementation using Foundation's NSURLSession.
  *
- * Dependency choice: libcurl is not part of the iOS/tvOS/watchOS SDKs, so on
- * Apple embedded platforms the client speaks HTTP through NSURLSession, which
- * is always present and requires no third-party linkage. This is the default
- * backend whenever ZHL_HTTP_BACKEND=apple (see zhl/CMakeLists.txt).
+ * Dependency choice: the desktop zcio backend's TLS rides OpenSSL, which the
+ * iOS/tvOS/watchOS SDKs don't ship, so on Apple embedded platforms the client
+ * speaks HTTP through NSURLSession — always present, https via the system
+ * trust store, no third-party linkage. This is the default backend whenever
+ * ZHL_HTTP_BACKEND=apple (see zhl/CMakeLists.txt).
  *
- * Both entry points are synchronous to match the libcurl backend's contract:
+ * Both entry points are synchronous to match the zcio backend's contract:
  * the async NSURLSession task is driven to completion on a private queue and
  * awaited via a dispatch semaphore. Compiled with ARC (-fobjc-arc).
  */

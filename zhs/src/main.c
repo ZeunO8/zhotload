@@ -13,19 +13,24 @@
  *
  * Data layout:
  *   {data_root}/{app_name}/{version}/artifact.{so|dylib|dll}
+ *
+ * HTTP server: zcio's hardened HTTP/1.1 server (zcio/http_server.h) — the same
+ * zcio dependency the zhl client's HTTP backend uses, replacing mongoose. The
+ * handler runs synchronously inside the poll loop; both endpoints are
+ * filesystem reads, well within "keep it short".
  */
 
-#include "mongoose.h"
-#include <cJSON.h>
+#include <zcio/http_server.h>
+#include <zcio/types.h>
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <dirent.h>
 
 #define DEFAULT_DATA_ROOT "data"
-#define DEFAULT_PORT      "8080"
+#define DEFAULT_PORT      8080
 
 static char g_data_root[512] = DEFAULT_DATA_ROOT;
 
@@ -115,38 +120,29 @@ found:
 /*  HTTP handlers                                                      */
 /* ------------------------------------------------------------------ */
 
-static void send_json(struct mg_connection *c, int code, const char *json)
+static void send_json(zcio_http_req *r, int status, const char *json)
 {
-    mg_printf(c,
-              "HTTP/1.1 %d OK\r\n"
-              "Content-Type: application/json\r\n"
-              "Content-Length: %u\r\n"
-              "\r\n"
-              "%s",
-              code, (unsigned)strlen(json), json);
+    const zcio_http_header hdr[] = {
+        { "Content-Type", "application/json" },
+    };
+    zcio_http_respond(r, status, hdr, 1, json, strlen(json));
 }
 
-static void send_error(struct mg_connection *c, int code, const char *msg)
+static void send_error(zcio_http_req *r, int status, const char *msg)
 {
     char buf[256];
     snprintf(buf, sizeof(buf), "{\"error\":\"%s\"}", msg);
-    mg_printf(c,
-              "HTTP/1.1 %d %s\r\n"
-              "Content-Type: application/json\r\n"
-              "Content-Length: %u\r\n"
-              "\r\n"
-              "%s",
-              code, msg, (unsigned)strlen(buf), buf);
+    send_json(r, status, buf);
 }
 
-static void handle_latest(struct mg_connection *c, const char *app_name)
+static void handle_latest(zcio_http_req *r, const char *app_name)
 {
     char app_dir[600];
     snprintf(app_dir, sizeof(app_dir), "%s/%s", g_data_root, app_name);
 
     char latest[64];
     if (find_latest_version(app_dir, latest, sizeof(latest)) != 0) {
-        send_error(c, 404, "No versions found");
+        send_error(r, 404, "No versions found");
         return;
     }
 
@@ -155,10 +151,10 @@ static void handle_latest(struct mg_connection *c, const char *app_name)
              "{\"version\":\"%s\",\"download_url\":\"/apps/%s/download/%s\",\"checksum\":\"\"}",
              latest, app_name, latest);
 
-    send_json(c, 200, json);
+    send_json(r, 200, json);
 }
 
-static void handle_download(struct mg_connection *c,
+static void handle_download(zcio_http_req *r,
                             const char *app_name,
                             const char *version)
 {
@@ -168,44 +164,61 @@ static void handle_download(struct mg_connection *c,
 
     char artifact[800];
     if (find_artifact(version_dir, artifact, sizeof(artifact)) != 0) {
-        send_error(c, 404, "Artifact not found");
-        return;
-    }
-
-    struct stat st;
-    if (stat(artifact, &st) != 0) {
-        send_error(c, 500, "Cannot stat artifact");
+        send_error(r, 404, "Artifact not found");
         return;
     }
 
     FILE *fp = fopen(artifact, "rb");
     if (!fp) {
-        send_error(c, 500, "Cannot open artifact");
+        send_error(r, 500, "Cannot open artifact");
         return;
     }
 
-    mg_printf(c,
-              "HTTP/1.1 200 OK\r\n"
-              "Content-Type: application/octet-stream\r\n"
-              "Content-Length: %ld\r\n"
-              "\r\n",
-              (long)st.st_size);
-
-    char buf[4096];
-    size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) {
-        mg_send(c, buf, n);
+    /* Responses go out as one complete zcio_http_respond, so the artifact is
+     * read whole into memory. Artifacts are shared libraries — MBs, not GBs. */
+    long file_size = -1;
+    if (fseek(fp, 0, SEEK_END) == 0) file_size = ftell(fp);
+    if (file_size < 0 || fseek(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        send_error(r, 500, "Cannot stat artifact");
+        return;
     }
+
+    char *data = (char *)malloc(file_size ? (size_t)file_size : 1);
+    if (!data) {
+        fclose(fp);
+        send_error(r, 500, "Out of memory");
+        return;
+    }
+
+    size_t got = fread(data, 1, (size_t)file_size, fp);
     fclose(fp);
+    if (got != (size_t)file_size) {
+        free(data);
+        send_error(r, 500, "Cannot read artifact");
+        return;
+    }
+
+    const zcio_http_header hdr[] = {
+        { "Content-Type", "application/octet-stream" },
+    };
+    zcio_http_respond(r, 200, hdr, 1, data, (size_t)file_size);
+    free(data);
 }
 
-static void ev_handler(struct mg_connection *c, int ev, void *ev_data)
+static void ev_handler(zcio_http_req *r, void *user)
 {
-    if (ev != MG_EV_HTTP_MSG) return;
+    (void)user;
 
-    struct mg_http_message *hm = (struct mg_http_message *)ev_data;
-    char uri[512];
-    snprintf(uri, sizeof(uri), "%.*s", (int)hm->uri.len, hm->uri.buf);
+    const char *method = zcio_http_req_method(r);
+    if (strcmp(method, "GET") != 0 && strcmp(method, "HEAD") != 0) {
+        send_error(r, 405, "Method not allowed");
+        return;
+    }
+
+    /* zcio hands the handler a percent-decoded, dot-segment-normalized path,
+     * so ".."-style traversal never reaches these routes. */
+    const char *uri = zcio_http_req_path(r);
 
     char app_name[256] = {0};
     char version[64] = {0};
@@ -217,11 +230,11 @@ static void ev_handler(struct mg_connection *c, int ev, void *ev_data)
      * %[^/] conversion (count == 1) and misroute to handle_latest. The `%c`
      * tail guard on /latest rejects any trailing characters after "/latest". */
     if (sscanf(uri, "/apps/%255[^/]/download/%63s", app_name, version) == 2) {
-        handle_download(c, app_name, version);
+        handle_download(r, app_name, version);
     } else if (sscanf(uri, "/apps/%255[^/]/latest%c", app_name, &tail) == 1) {
-        handle_latest(c, app_name);
+        handle_latest(r, app_name);
     } else {
-        send_error(c, 404, "Not found");
+        send_error(r, 404, "Not found");
     }
 }
 
@@ -229,41 +242,64 @@ static void ev_handler(struct mg_connection *c, int ev, void *ev_data)
 /*  main                                                               */
 /* ------------------------------------------------------------------ */
 
+static zcio_http_server *g_server = NULL;
+
+/* zcio_http_server_stop is async-signal-safe: it sets a flag and pokes a wake
+ * pipe, then run() drains in-flight exchanges and returns. */
+static void on_signal(int sig)
+{
+    (void)sig;
+    if (g_server) zcio_http_server_stop(g_server);
+}
+
 int main(int argc, char **argv)
 {
-    const char *port = DEFAULT_PORT;
+    int port = DEFAULT_PORT;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--data") == 0 && i + 1 < argc) {
             strncpy(g_data_root, argv[++i], sizeof(g_data_root) - 1);
         } else if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
-            port = argv[++i];
+            port = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--help") == 0) {
             printf("Usage: zhs [--data DIR] [--port PORT]\n");
             printf("  --data DIR   Root directory for app artifacts (default: %s)\n", DEFAULT_DATA_ROOT);
-            printf("  --port PORT  HTTP listen port (default: %s)\n", DEFAULT_PORT);
+            printf("  --port PORT  HTTP listen port (default: %d)\n", DEFAULT_PORT);
             return 0;
         }
     }
 
-    struct mg_mgr mgr;
-    mg_mgr_init(&mgr);
+    zcio_http_server_config cfg = {0};
+    cfg.port = port;
+    /* Whole artifacts are queued as a single response; raise the per-connection
+     * output cap (default 4 MiB) so large shared libraries fit comfortably. */
+    cfg.max_out_bytes = (size_t)256 * 1024 * 1024;
+    /* Handlers are sub-millisecond filesystem reads, so the graceful-stop
+     * drain (default 5 s) only delays Ctrl-C; a second is ample. */
+    cfg.drain_timeout_ms = 1000;
 
-    char listen_addr[64];
-    snprintf(listen_addr, sizeof(listen_addr), "http://0.0.0.0:%s", port);
-
-    struct mg_connection *c = mg_http_listen(&mgr, listen_addr, ev_handler, NULL);
-    if (!c) {
-        fprintf(stderr, "Failed to listen on %s\n", listen_addr);
+    zcio_http_server *s = zcio_http_server_start(&cfg, ev_handler, NULL);
+    if (!s) {
+        fprintf(stderr, "Failed to listen on :%d (%s)\n", port, zcio_last_error());
         return 1;
     }
+    g_server = s;
 
-    printf("zhs listening on %s, serving from %s\n", listen_addr, g_data_root);
+    signal(SIGINT, on_signal);
+#ifdef SIGTERM
+    signal(SIGTERM, on_signal);
+#endif
 
-    for (;;) {
-        mg_mgr_poll(&mgr, 1000);
+    printf("zhs listening on http://0.0.0.0:%d, serving from %s\n",
+           zcio_http_server_port(s), g_data_root);
+
+    int rc = zcio_http_server_run(s);
+    g_server = NULL;
+    zcio_http_server_free(s);
+
+    if (rc != ZCIO_OK) {
+        fprintf(stderr, "zhs: server loop failed (%s)\n", zcio_result_str((zcio_result)rc));
+        return 1;
     }
-
-    mg_mgr_free(&mgr);
     return 0;
 }
