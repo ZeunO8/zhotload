@@ -279,6 +279,37 @@ manager restarts it on the new version. Self-update is never unsigned; the
 trust key is inlined into the service file so no key file is needed at
 runtime.
 
+## Git-Tag (Remote) Ingestion
+
+Watch-dir ingestion (dropping a version directory into `{data}` by hand) is
+already automatic — `/latest` scans per request. `--ingest` is the URL
+counterpart: zhs polls a GitHub repo's Releases API on its own and pulls a
+newer tagged release in without anyone copying files by hand.
+
+```sh
+zhs --data /srv/zhs-data --port 8080 \
+    --ingest gdz-core=ZeunO8/GDZ:libGDZ_hot \
+    --ingest-interval 300
+```
+
+`--ingest APP=OWNER/REPO[:ASSET_SUBSTR]` is repeatable (one entry per app).
+Between poll iterations (cadence `--ingest-interval`, default 300 s), zhs
+fetches `OWNER/REPO`'s latest release; when its tag is a newer semver than
+what `APP` already has locally, it downloads the first release asset whose
+name contains `ASSET_SUBSTR` (or, if omitted, the first non-`.sig` asset)
+into `{data}/APP/{tag}/`, along with a same-named `.sig` sibling asset when
+the release publishes one. From there it's indistinguishable from a
+hand-dropped version — `/latest` picks it up immediately, and a pinned-key
+launcher enforces the signature exactly as it would for any other download.
+An unsigned release still ingests (fail-open on ingestion); a client with a
+trusted key pinned simply rejects it downstream (fail-closed on load) —
+same behavior as manually dropping an unsigned build into the data tree.
+
+`--ingest` works with `install-service` too (baked into the generated
+service file alongside `--watch-self`). Test override: env
+`ZHS_GITHUB_API_BASE` replaces `https://api.github.com`, for pointing the
+poller at a mock server.
+
 ## Dependencies
 
 | Library      | Used by  | Fetch method   | Purpose                              |
@@ -286,5 +317,5 @@ runtime.
 | zcio         | zhl, zhs | `FetchContent` | HTTP client (desktop backend) + HTTP server |
 | Foundation   | zhl      | system framework | HTTP client (iOS/tvOS/watchOS backend) |
 | HttpURLConnection | zhl | Android framework (JNI) | HTTP client (Android backend)    |
-| cJSON        | zhl      | `FetchContent` | JSON parsing                         |
+| cJSON        | zhl, zhs | `FetchContent` | JSON parsing (zhl manifests; zhs GitHub Releases ingestion) |
 | OpenSSL      | zcio     | `find_package` (optional) | TLS for `https://` on the desktop backend |

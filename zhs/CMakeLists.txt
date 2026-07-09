@@ -19,4 +19,9 @@ zhl_compile_options(zhs)
 # self-update compares against) the project version.
 target_include_directories(zhs PRIVATE ${PROJECT_BINARY_DIR}/inc)
 
-target_link_libraries(zhs PRIVATE zcio)
+# cJSON: parses GitHub Releases API responses for --ingest (git-tag/URL
+# ingestion). Already fetched at the top level for zhl's own manifest parsing;
+# the cjson target doesn't publish its header dir, so add it explicitly
+# (mirrors zhl/CMakeLists.txt's own cJSON.h include path).
+target_link_libraries(zhs PRIVATE zcio cjson)
+target_include_directories(zhs PRIVATE ${cjson_SOURCE_DIR})

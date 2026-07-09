@@ -91,3 +91,18 @@ if(NOT WIN32)
     find_package(Threads REQUIRED)
     target_link_libraries(test_signed_update PRIVATE Threads::Threads)
 endif()
+
+# The --ingest (git-tag/URL) test spawns the REAL zhs executable via
+# fork/exec and drives it against a mock GitHub-shaped server, so it needs
+# zhs to be built and is POSIX-only (fork/exec; not attempted cross-compiled).
+if(TARGET zhs AND NOT WIN32 AND NOT CMAKE_CROSSCOMPILING)
+    add_executable(test_ingest test_ingest.c)
+    zhl_compile_options(test_ingest)
+    target_link_libraries(test_ingest PRIVATE zcio)
+    find_package(Threads REQUIRED)
+    target_link_libraries(test_ingest PRIVATE Threads::Threads)
+    target_compile_definitions(test_ingest PRIVATE ZHS_EXE_PATH="$<TARGET_FILE:zhs>")
+    add_test(NAME test_ingest COMMAND test_ingest WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    set_tests_properties(test_ingest PROPERTIES TIMEOUT 30)
+    add_dependencies(test_ingest zhs)
+endif()

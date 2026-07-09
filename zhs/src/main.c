@@ -39,17 +39,35 @@
  *       0 — the service manager (KeepAlive / Restart=always) restarts it on
  *       the new version. Unsigned or badly signed candidates are ignored.
  *
+ * Git-tag (remote) ingestion:
+ *   --ingest APP=OWNER/REPO[:ASSET_SUBSTR]
+ *       Between poll iterations zhs polls the GitHub Releases API for
+ *       OWNER/REPO's latest release. When its tag is a newer semver than what
+ *       APP already has locally, the first release asset matching
+ *       ASSET_SUBSTR (or, if omitted, the first non-".sig" asset) is
+ *       downloaded into {data}/{APP}/{tag}/, along with a same-named
+ *       ".sig" sibling asset when the release publishes one. This is the
+ *       "URL" counterpart to watch-dir ingestion (dropping a version
+ *       directory in by hand) — CI publishes a GitHub Release with signed
+ *       artifacts as assets, and zhs picks it up on its own. Repeatable, one
+ *       entry per app. Test override: env ZHS_GITHUB_API_BASE replaces
+ *       "https://api.github.com" (points the poller at a mock server).
+ *
  * HTTP server: zcio's hardened HTTP/1.1 server (zcio/http_server.h). The
  * handler runs synchronously inside the poll loop; both endpoints are
  * filesystem reads, well within "keep it short".
  */
 
+#include <zcio/http.h>
 #include <zcio/http_server.h>
 #include <zcio/crypto.h>
 #include <zcio/types.h>
 #include <zhl/version.h>
+#include <cJSON.h>
 
+#include <errno.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,6 +76,7 @@
 #if defined(_WIN32)
 #  include <windows.h>
 #  include <io.h>
+#  include <direct.h>
 #else
 #  include <dirent.h>
 #  include <unistd.h>
@@ -569,12 +588,261 @@ static int self_update_check(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Git-tag (remote) ingestion                                          */
+/* ------------------------------------------------------------------ */
+
+#define ZHS_MAX_INGESTS 16
+#define ZHS_DEFAULT_INGEST_INTERVAL_S 300
+
+typedef struct {
+    char app[128];
+    char owner_repo[256];
+    char asset_substr[128];   /* "" = first non-".sig" asset */
+} ingest_source_t;
+
+static ingest_source_t g_ingests[ZHS_MAX_INGESTS];
+static int g_ingest_count = 0;
+static int g_ingest_interval = ZHS_DEFAULT_INGEST_INTERVAL_S;
+
+/* mkdir -p. Best-effort: a pre-existing directory is success. */
+static int mkdir_p(const char *path)
+{
+    char tmp[1024];
+    size_t len = strlen(path);
+    if (len == 0 || len >= sizeof(tmp)) return -1;
+    memcpy(tmp, path, len + 1);
+    if (tmp[len - 1] == '/') tmp[len - 1] = '\0';
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+#if defined(_WIN32)
+            if (_mkdir(tmp) != 0 && errno != EEXIST) return -1;
+#else
+            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
+#endif
+            *p = '/';
+        }
+    }
+#if defined(_WIN32)
+    if (_mkdir(tmp) != 0 && errno != EEXIST) return -1;
+#else
+    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
+#endif
+    return 0;
+}
+
+/* Parse "APP=OWNER/REPO[:ASSET_SUBSTR]" into *out. Returns 0 on success. */
+static int parse_ingest_arg(const char *arg, ingest_source_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    const char *eq = strchr(arg, '=');
+    if (!eq || eq == arg) return -1;
+    size_t app_len = (size_t)(eq - arg);
+    if (app_len >= sizeof(out->app)) return -1;
+    memcpy(out->app, arg, app_len);
+    out->app[app_len] = '\0';
+
+    const char *rest = eq + 1;
+    const char *colon = strchr(rest, ':');
+    size_t repo_len = colon ? (size_t)(colon - rest) : strlen(rest);
+    if (repo_len == 0 || repo_len >= sizeof(out->owner_repo)) return -1;
+    memcpy(out->owner_repo, rest, repo_len);
+    out->owner_repo[repo_len] = '\0';
+    if (!strchr(out->owner_repo, '/')) return -1;   /* must be owner/repo */
+
+    if (colon && colon[1]) {
+        snprintf(out->asset_substr, sizeof(out->asset_substr), "%s", colon + 1);
+    }
+    return 0;
+}
+
+/* GET url (no auth — public release assets/API) and write the body to
+ * dir/filename. 0 on success. */
+static int download_to_file(const char *url, const char *dir, const char *filename)
+{
+    static const zcio_http_header hdr = { "User-Agent", "zhs-update-server" };
+    zcio_http_opts opts = { .timeout_ms = 30000 };
+    zcio_http_response r = zcio_http_request_opts("GET", url, &hdr, 1, NULL, 0, &opts);
+    if (r.status != 200 || !r.body) {
+        fprintf(stderr, "zhs: ingest: GET %s failed (status %d, %s)\n",
+                url, r.status, zcio_last_error());
+        zcio_http_response_free(&r);
+        return -1;
+    }
+    char path[900];
+    snprintf(path, sizeof(path), "%s/%s", dir, filename);
+    FILE *fp = fopen(path, "wb");
+    if (!fp) { zcio_http_response_free(&r); return -1; }
+    size_t wrote = fwrite(r.body, 1, r.body_size, fp);
+    fclose(fp);
+    int ok = wrote == r.body_size;
+    zcio_http_response_free(&r);
+    if (!ok) remove(path);
+    return ok ? 0 : -1;
+}
+
+/* Poll one GitHub repo's latest release; if its tag is newer than what `src`'s
+ * app already has locally, download the matching asset (+ ".sig" sibling, if
+ * published) into {data}/{app}/{tag}/. Best-effort throughout: any failure is
+ * logged and treated as "nothing to do" so one bad source never wedges the
+ * poll loop or takes down the others. Returns 1 on a successful ingest. */
+static int ingest_check_one(const ingest_source_t *src)
+{
+    const char *api_base = getenv("ZHS_GITHUB_API_BASE");
+    if (!api_base || !api_base[0]) api_base = "https://api.github.com";
+
+    char url[600];
+    snprintf(url, sizeof(url), "%s/repos/%s/releases/latest", api_base, src->owner_repo);
+
+    static const zcio_http_header hdrs[] = {
+        { "User-Agent", "zhs-update-server" },
+        { "Accept", "application/vnd.github+json" },
+    };
+    zcio_http_opts opts = { .timeout_ms = 10000 };
+    zcio_http_response r = zcio_http_request_opts("GET", url, hdrs, 2, NULL, 0, &opts);
+    if (r.status != 200 || !r.body) {
+        fprintf(stderr, "zhs: ingest %s: fetch failed (status %d, %s)\n",
+                src->owner_repo, r.status, zcio_last_error());
+        zcio_http_response_free(&r);
+        return 0;
+    }
+
+    cJSON *root = cJSON_Parse(r.body);
+    zcio_http_response_free(&r);
+    if (!root) {
+        fprintf(stderr, "zhs: ingest %s: malformed release JSON\n", src->owner_repo);
+        return 0;
+    }
+
+    const cJSON *j_tag = cJSON_GetObjectItemCaseSensitive(root, "tag_name");
+    if (!cJSON_IsString(j_tag) || !j_tag->valuestring) {
+        cJSON_Delete(root);
+        return 0;
+    }
+    /* Tags are conventionally "v1.2.3.4"; strip a leading v/V to match the
+     * bare semver directory-naming convention find_latest_version expects.
+     * Copied into a fixed buffer up front: j_tag->valuestring is owned by
+     * `root`, which is deleted partway through this function, but `tag` is
+     * still needed afterward (to build version_dir). */
+    const char *raw_tag = j_tag->valuestring;
+    const char *tag_src = (raw_tag[0] == 'v' || raw_tag[0] == 'V') ? raw_tag + 1 : raw_tag;
+    char tag[64];
+    snprintf(tag, sizeof(tag), "%s", tag_src);
+    unsigned int maj, min, pat, twk;
+    if (!parse_semver(tag, &maj, &min, &pat, &twk)) {
+        fprintf(stderr, "zhs: ingest %s: tag '%s' is not a semver — skipped\n",
+                src->owner_repo, raw_tag);
+        cJSON_Delete(root);
+        return 0;
+    }
+
+    char app_dir[700];
+    snprintf(app_dir, sizeof(app_dir), "%s/%s", g_data_root, src->app);
+    char have[64];
+    if (find_latest_version(app_dir, have, sizeof(have)) == 0 &&
+        semver_cmp(tag, have) <= 0) {
+        cJSON_Delete(root);
+        return 0;   /* already current */
+    }
+
+    const cJSON *assets = cJSON_GetObjectItemCaseSensitive(root, "assets");
+    if (!cJSON_IsArray(assets)) {
+        fprintf(stderr, "zhs: ingest %s: release %s has no assets array\n",
+                src->owner_repo, tag);
+        cJSON_Delete(root);
+        return 0;
+    }
+
+    /* First pass: the primary artifact — first non-".sig" asset matching
+     * asset_substr (or the first non-".sig" asset when unset). */
+    char primary_name[256] = "", primary_url[1024] = "";
+    const cJSON *asset;
+    cJSON_ArrayForEach(asset, assets) {
+        const cJSON *j_name = cJSON_GetObjectItemCaseSensitive(asset, "name");
+        const cJSON *j_url  = cJSON_GetObjectItemCaseSensitive(asset, "browser_download_url");
+        if (!cJSON_IsString(j_name) || !cJSON_IsString(j_url)) continue;
+        const char *name = j_name->valuestring;
+        size_t nlen = strlen(name);
+        bool is_sig = nlen > 4 && strcmp(name + nlen - 4, ".sig") == 0;
+        if (primary_name[0] || is_sig) continue;
+        if (src->asset_substr[0] && !strstr(name, src->asset_substr)) continue;
+        snprintf(primary_name, sizeof(primary_name), "%s", name);
+        snprintf(primary_url, sizeof(primary_url), "%s", j_url->valuestring);
+    }
+    if (!primary_name[0]) {
+        fprintf(stderr, "zhs: ingest %s: release %s has no matching asset%s%s\n",
+                src->owner_repo, tag,
+                src->asset_substr[0] ? " for pattern " : "", src->asset_substr);
+        cJSON_Delete(root);
+        return 0;
+    }
+
+    /* Second pass: an optional "{primary_name}.sig" sibling asset. */
+    char sig_name[300], sig_url[1024] = "";
+    snprintf(sig_name, sizeof(sig_name), "%s.sig", primary_name);
+    cJSON_ArrayForEach(asset, assets) {
+        const cJSON *j_name = cJSON_GetObjectItemCaseSensitive(asset, "name");
+        const cJSON *j_url  = cJSON_GetObjectItemCaseSensitive(asset, "browser_download_url");
+        if (!cJSON_IsString(j_name) || !cJSON_IsString(j_url)) continue;
+        if (strcmp(j_name->valuestring, sig_name) == 0) {
+            snprintf(sig_url, sizeof(sig_url), "%s", j_url->valuestring);
+            break;
+        }
+    }
+    cJSON_Delete(root);
+
+    char version_dir[800];
+    snprintf(version_dir, sizeof(version_dir), "%s/%s", app_dir, tag);
+    if (mkdir_p(version_dir) != 0) {
+        fprintf(stderr, "zhs: ingest %s: cannot create %s\n", src->owner_repo, version_dir);
+        return 0;
+    }
+
+    if (download_to_file(primary_url, version_dir, primary_name) != 0) {
+        fprintf(stderr, "zhs: ingest %s: failed to download %s\n",
+                src->owner_repo, primary_name);
+        return 0;
+    }
+    if (sig_url[0]) {
+        /* Best-effort: an unsigned ingest still publishes — pinned-key
+         * clients simply reject it, same as a hand-dropped unsigned build. */
+        (void)download_to_file(sig_url, version_dir, sig_name);
+    }
+
+    printf("zhs: ingested %s/%s %s -> %s (%s)\n",
+           src->owner_repo, primary_name, tag, src->app,
+           sig_url[0] ? "signed" : "unsigned");
+    return 1;
+}
+
+/* Poll every configured ingest source once. Returns the number ingested. */
+static int ingest_check_all(void)
+{
+    int n = 0;
+    for (int i = 0; i < g_ingest_count; i++)
+        n += ingest_check_one(&g_ingests[i]) ? 1 : 0;
+    return n;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Service install                                                    */
 /* ------------------------------------------------------------------ */
 
+/* Format one ingest source back into its "APP=OWNER/REPO[:ASSET_SUBSTR]" CLI
+ * form, for baking into a generated service file. */
+static void format_ingest_arg(const ingest_source_t *src, char *out, size_t cap)
+{
+    if (src->asset_substr[0])
+        snprintf(out, cap, "%s=%s:%s", src->app, src->owner_repo, src->asset_substr);
+    else
+        snprintf(out, cap, "%s=%s", src->app, src->owner_repo);
+}
+
 static int cmd_install_service(const char *data_root, int port,
                                const char *host,
-                               const char *self_app, const char *trust_key_arg)
+                               const char *self_app, const char *trust_key_arg,
+                               const ingest_source_t *ingests, int ingest_count,
+                               int ingest_interval)
 {
     char exe[1024];
     if (self_exe_path(exe, sizeof(exe)) != 0) {
@@ -619,6 +887,14 @@ static int cmd_install_service(const char *data_root, int port,
         fprintf(fp, "    <string>--watch-self</string><string>%s</string>\n"
                     "    <string>--trust-key</string><string>%s</string>\n",
                 self_app, trust_key_arg);
+    for (int i = 0; i < ingest_count; i++) {
+        char arg[600];
+        format_ingest_arg(&ingests[i], arg, sizeof(arg));
+        fprintf(fp, "    <string>--ingest</string><string>%s</string>\n", arg);
+    }
+    if (ingest_count > 0)
+        fprintf(fp, "    <string>--ingest-interval</string><string>%d</string>\n",
+                ingest_interval);
     fprintf(fp,
         "  </array>\n"
         "  <key>RunAtLoad</key><true/>\n"
@@ -646,6 +922,12 @@ static int cmd_install_service(const char *data_root, int port,
     if (host && host[0]) fprintf(fp, " --host %s", host);
     if (self_app && self_app[0] && trust_key_arg && trust_key_arg[0])
         fprintf(fp, " --watch-self %s --trust-key %s", self_app, trust_key_arg);
+    for (int i = 0; i < ingest_count; i++) {
+        char arg[600];
+        format_ingest_arg(&ingests[i], arg, sizeof(arg));
+        fprintf(fp, " --ingest %s", arg);
+    }
+    if (ingest_count > 0) fprintf(fp, " --ingest-interval %d", ingest_interval);
     fprintf(fp,
         "\nRestart=always\nRestartSec=1\n\n"
         "[Install]\nWantedBy=default.target\n");
@@ -656,6 +938,7 @@ static int cmd_install_service(const char *data_root, int port,
     return 0;
 #else
     (void)port; (void)host; (void)self_app; (void)trust_key_arg;
+    (void)ingests; (void)ingest_count; (void)ingest_interval;
     fprintf(stderr, "zhs: install-service is not supported on this platform\n");
     return 1;
 #endif
@@ -704,10 +987,12 @@ static void usage(void)
 {
     printf("Usage: zhs [--data DIR] [--port PORT] [--host HOST]\n"
            "           [--watch-self APP --trust-key HEX|@FILE [--self-interval SEC]]\n"
+           "           [--ingest APP=OWNER/REPO[:ASSET_SUBSTR] ...] [--ingest-interval SEC]\n"
            "       zhs keygen <keyfile>\n"
            "       zhs sign <keyfile> <file>...\n"
            "       zhs install-service [--data DIR] [--port PORT] [--host HOST]\n"
            "                           [--watch-self APP --trust-key HEX|@FILE]\n"
+           "                           [--ingest APP=OWNER/REPO[:ASSET_SUBSTR] ...]\n"
            "  --data DIR        Root directory for app artifacts (default: %s)\n"
            "  --port PORT       HTTP listen port (default: %d)\n"
            "  --host HOST       Interface to bind (default: all; e.g. localhost)\n"
@@ -716,8 +1001,15 @@ static void usage(void)
            "                    this executable atomically and exit 0 for the\n"
            "                    service manager to restart\n"
            "  --trust-key K     Ed25519 public key artifacts must be signed with\n"
-           "  --self-interval S Self-update check cadence in seconds (default %d)\n",
-           DEFAULT_DATA_ROOT, DEFAULT_PORT, DEFAULT_SELF_INTERVAL_S);
+           "  --self-interval S Self-update check cadence in seconds (default %d)\n"
+           "  --ingest A=O/R[:S] Poll GitHub repo O/R's latest release; when its tag\n"
+           "                    is newer than app A's local version, download the\n"
+           "                    asset matching substring S (default: first non-.sig\n"
+           "                    asset) into {data}/A/{tag}/, plus a \".sig\" sibling\n"
+           "                    asset if the release publishes one. Repeatable.\n"
+           "  --ingest-interval S  Ingestion poll cadence in seconds (default %d)\n",
+           DEFAULT_DATA_ROOT, DEFAULT_PORT, DEFAULT_SELF_INTERVAL_S,
+           ZHS_DEFAULT_INGEST_INTERVAL_S);
 }
 
 int main(int argc, char **argv)
@@ -746,6 +1038,22 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--self-interval") == 0 && i + 1 < argc) {
             g_self_interval = atoi(argv[++i]);
             if (g_self_interval < 1) g_self_interval = 1;
+        } else if (strcmp(argv[i], "--ingest") == 0 && i + 1 < argc) {
+            const char *arg = argv[++i];
+            if (g_ingest_count >= ZHS_MAX_INGESTS) {
+                fprintf(stderr, "zhs: too many --ingest sources (max %d) — ignoring %s\n",
+                        ZHS_MAX_INGESTS, arg);
+            } else if (parse_ingest_arg(arg, &g_ingests[g_ingest_count]) != 0) {
+                fprintf(stderr,
+                        "zhs: malformed --ingest '%s' (want APP=OWNER/REPO[:ASSET_SUBSTR])\n",
+                        arg);
+                return 1;
+            } else {
+                g_ingest_count++;
+            }
+        } else if (strcmp(argv[i], "--ingest-interval") == 0 && i + 1 < argc) {
+            g_ingest_interval = atoi(argv[++i]);
+            if (g_ingest_interval < 1) g_ingest_interval = 1;
         } else if (strcmp(argv[i], "--help") == 0) {
             usage();
             return 0;
@@ -760,7 +1068,8 @@ int main(int argc, char **argv)
             zcio_hex_encode(g_trust_key, sizeof(g_trust_key), trust_key_arg);
         }
         return cmd_install_service(g_data_root, port, host,
-                                   g_self_app, trust_key_arg);
+                                   g_self_app, trust_key_arg,
+                                   g_ingests, g_ingest_count, g_ingest_interval);
     }
 
     if (g_self_app[0]) {
@@ -795,15 +1104,17 @@ int main(int argc, char **argv)
     signal(SIGTERM, on_signal);
 #endif
 
-    printf("zhs %s listening on http://%s:%d, serving from %s%s\n",
+    printf("zhs %s listening on http://%s:%d, serving from %s%s%s\n",
            ZHL_VERSION_STRING, host[0] ? host : "0.0.0.0",
            zcio_http_server_port(s), g_data_root,
-           g_self_app[0] ? " (self-update armed)" : "");
+           g_self_app[0] ? " (self-update armed)" : "",
+           g_ingest_count > 0 ? " (ingestion armed)" : "");
 
-    /* Event loop with a self-update check between iterations. poll() returns
-     * ZCIO_ERR_EOF (negative) once a stop() has fully drained. */
+    /* Event loop with self-update + ingestion checks between iterations.
+     * poll() returns ZCIO_ERR_EOF (negative) once a stop() has fully drained. */
     int rc = ZCIO_OK;
     time_t next_self = time(NULL) + g_self_interval;
+    time_t next_ingest = time(NULL) + g_ingest_interval;
     int self_updated = 0;
     for (;;) {
         int p = zcio_http_server_poll(s, 1000);
@@ -817,6 +1128,10 @@ int main(int argc, char **argv)
                 self_updated = 1;
                 zcio_http_server_stop(s);   /* drain, then exit 0 below */
             }
+        }
+        if (g_ingest_count > 0 && time(NULL) >= next_ingest) {
+            next_ingest = time(NULL) + g_ingest_interval;
+            (void)ingest_check_all();
         }
     }
     g_server = NULL;
