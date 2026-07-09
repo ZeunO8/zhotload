@@ -1090,6 +1090,10 @@ int main(int argc, char **argv)
     /* Handlers are sub-millisecond filesystem reads, so the graceful-stop
      * drain (default 5 s) only delays Ctrl-C; a second is ample. */
     cfg.drain_timeout_ms = 1000;
+    /* zhs runs as a fixed-port service and restarts itself on the SAME port
+     * after a signed self-update (exit 0 -> supervisor re-execs) — needs to
+     * rebind immediately rather than fail on a lingering TIME_WAIT. */
+    cfg.reuse_addr = true;
 
     zcio_http_server *s = zcio_http_server_start(&cfg, ev_handler, NULL);
     if (!s) {

@@ -89,7 +89,7 @@ set(ZCIO_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(zcio
     GIT_REPOSITORY https://github.com/ZeunO8/zcio.git
     GIT_SHALLOW TRUE
-    GIT_TAG v1.3.4.0
+    GIT_TAG v1.3.5.0
 )
 message(STATUS "Fetching zcio from GitHub...")
 FetchContent_MakeAvailable(zcio)
