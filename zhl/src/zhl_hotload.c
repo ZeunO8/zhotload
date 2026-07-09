@@ -32,6 +32,14 @@ static zhl_status_t read_export_table(zhl_dl_handle_t handle,
     return ZHL_OK;
 }
 
+/* Bounded set of distinct handles pending release once the binding loop
+ * below is done reading from them. 64 covers every realistic binding count
+ * (an app with more than 64 DISTINCT origin libraries feeding one context
+ * would be extraordinary); the fallback if it's ever exceeded is simply to
+ * release immediately, same as the old (buggy) behavior — a regression only
+ * in that specific edge case, never a crash. */
+#define ZHL_MAX_PENDING_RELEASES 64
+
 zhl_status_t zhl_hotload_apply(zhl_ctx_t ctx)
 {
     if (!ctx) return ZHL_ERR_NULL_PARAM;
@@ -64,6 +72,17 @@ zhl_status_t zhl_hotload_apply(zhl_ctx_t ctx)
         zhl_dl_close(new_handle);
         return ZHL_ERR_ALLOC;
     }
+
+    /* Handles released inline, mid-loop, would risk dlclose()-ing the very
+     * library old_table (or a later binding's own old export table) points
+     * into — safe with exactly one binding (the original qtx_hot usage:
+     * one whole-core entry point), but a real crash the moment more than
+     * one binding shares an origin library and an EARLIER binding's release
+     * drops that library's refcount to zero before a LATER binding has
+     * finished reading its table. Collect handles here; release them only
+     * after every binding has been fully processed. */
+    zhl_dl_handle_t pending_release[ZHL_MAX_PENDING_RELEASES];
+    uint32_t pending_count = 0;
 
     for (uint32_t i = 0; i < ctx->binding_count; i++) {
         const zhl_export_entry_t *new_entry = find_entry(new_table, ctx->bindings[i].name);
@@ -99,9 +118,25 @@ zhl_status_t zhl_hotload_apply(zhl_ctx_t ctx)
             }
 
             if (prev_handle && prev_handle != new_handle) {
-                zhl_ctx_release_lib(ctx, prev_handle);
+                int already_pending = 0;
+                for (uint32_t k = 0; k < pending_count; k++) {
+                    if (pending_release[k] == prev_handle) { already_pending = 1; break; }
+                }
+                if (!already_pending) {
+                    if (pending_count < ZHL_MAX_PENDING_RELEASES) {
+                        pending_release[pending_count++] = prev_handle;
+                    } else {
+                        /* Overflow fallback: release now (matches the old
+                         * behavior's risk profile, not a new one). */
+                        zhl_ctx_release_lib(ctx, prev_handle);
+                    }
+                }
             }
         }
+    }
+
+    for (uint32_t k = 0; k < pending_count; k++) {
+        zhl_ctx_release_lib(ctx, pending_release[k]);
     }
 
     ctx->downloaded_lib_path[0] = '\0';
