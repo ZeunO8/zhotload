@@ -15,4 +15,8 @@
 add_executable(zhs src/main.c)
 zhl_compile_options(zhs)
 
+# ${PROJECT_BINARY_DIR}/inc: generated zhl/version.h — zhs reports (and
+# self-update compares against) the project version.
+target_include_directories(zhs PRIVATE ${PROJECT_BINARY_DIR}/inc)
+
 target_link_libraries(zhs PRIVATE zcio)

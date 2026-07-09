@@ -90,7 +90,10 @@ typedef enum zhl_status {
     ZHL_ERR_INVALID_MANIFEST = -13,
     ZHL_ERR_NOT_CONFIGURED  = -14,
     ZHL_ERR_NOT_FOUND       = -15,
-    ZHL_ERR_IO              = -16
+    ZHL_ERR_IO              = -16,
+    ZHL_ERR_SIGNATURE_INVALID = -17, /**< Ed25519 verification failed.        */
+    ZHL_ERR_UNSIGNED        = -18,   /**< Trusted key set but no signature.   */
+    ZHL_ERR_INVALID_KEY     = -19    /**< Malformed trusted-key hex string.   */
 } zhl_status_t;
 
 /* ------------------------------------------------------------------ */
@@ -125,11 +128,15 @@ typedef enum zhl_cmp {
 /** Maximum length of a hex-encoded checksum (including NUL). */
 #define ZHL_MAX_CHECKSUM_LEN 128
 
+/** Maximum length of a hex-encoded Ed25519 signature (128 hex + NUL). */
+#define ZHL_MAX_SIGNATURE_LEN 132
+
 /** Information about an available update, filled by zhl_check_for_update(). */
 typedef struct zhl_update_info {
     char version[ZHL_MAX_VERSION_LEN];
     char download_url[ZHL_MAX_URL_LEN];
-    char checksum[ZHL_MAX_CHECKSUM_LEN];
+    char checksum[ZHL_MAX_CHECKSUM_LEN];    /**< SHA-256 hex, "" when absent  */
+    char signature[ZHL_MAX_SIGNATURE_LEN];  /**< Ed25519 hex, "" when absent  */
 } zhl_update_info_t;
 
 /* ------------------------------------------------------------------ */
@@ -265,6 +272,25 @@ zhl_status_t zhl_ctx_set_current_lib_path(zhl_ctx_t ctx, const char *path);
  * @return ZHL_OK, ZHL_ERR_NULL_PARAM, or ZHL_ERR_EMPTY_STRING.
  */
 zhl_status_t zhl_ctx_set_staging_dir(zhl_ctx_t ctx, const char *path);
+
+/**
+ * Pin the Ed25519 public key that artifacts must be signed with.
+ *
+ * @param pubkey_hex  64 hex characters (32-byte key), or NULL to clear.
+ *
+ * Once a key is set, zhl_download_update() REQUIRES every artifact to carry
+ * a valid signature: the manifest's `signature` (Ed25519 over the raw
+ * artifact bytes) is verified after download and before the artifact is
+ * accepted, and the SHA-256 `checksum` is enforced when present. A missing
+ * signature fails with ZHL_ERR_UNSIGNED, a bad one with
+ * ZHL_ERR_SIGNATURE_INVALID; the staged file is deleted in both cases.
+ *
+ * With no key set the previous behavior applies (checksum verified when the
+ * manifest provides one, signature ignored).
+ *
+ * @return ZHL_OK, ZHL_ERR_NULL_PARAM, or ZHL_ERR_INVALID_KEY.
+ */
+zhl_status_t zhl_ctx_set_trusted_key(zhl_ctx_t ctx, const char *pubkey_hex);
 
 /* ------------------------------------------------------------------ */
 /*  Registration                                                       */

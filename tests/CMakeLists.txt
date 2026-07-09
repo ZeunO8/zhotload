@@ -83,3 +83,11 @@ zhl_add_test(test_update_check   test_update_check.c)
 zhl_add_test(test_download       test_download.c)
 zhl_add_test(test_dl_abstraction test_dl_abstraction.c)
 zhl_add_test(test_hotload_apply  test_hotload_apply.c)
+zhl_add_test(test_signed_update  test_signed_update.c)
+# The signed-update test hosts an in-process zcio HTTP server (mock zhs) and
+# signs artifacts with zcio/crypto.h directly.
+target_link_libraries(test_signed_update PRIVATE zcio)
+if(NOT WIN32)
+    find_package(Threads REQUIRED)
+    target_link_libraries(test_signed_update PRIVATE Threads::Threads)
+endif()

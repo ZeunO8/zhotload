@@ -41,6 +41,9 @@ struct zhl_ctx_impl {
     uint32_t          loaded_lib_count;
 
     char downloaded_lib_path[ZHL_MAX_PATH_LEN];
+
+    uint8_t trusted_key[32];   /* Ed25519 public key                          */
+    int     trusted_key_set;   /* 0 = signatures not required (legacy mode)   */
 };
 
 char *zhl_strdup(const char *s);

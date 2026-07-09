@@ -4,6 +4,7 @@
  */
 
 #include "zhl_internal.h"
+#include <zcio/crypto.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -182,6 +183,24 @@ zhl_status_t zhl_ctx_set_staging_dir(zhl_ctx_t ctx, const char *path)
     if (!path) return ZHL_ERR_NULL_PARAM;
     if (path[0] == '\0') return ZHL_ERR_EMPTY_STRING;
     return zhl_set_str(&ctx->staging_dir, path);
+}
+
+zhl_status_t zhl_ctx_set_trusted_key(zhl_ctx_t ctx, const char *pubkey_hex)
+{
+    if (!ctx) return ZHL_ERR_NULL_PARAM;
+    if (!pubkey_hex) {
+        memset(ctx->trusted_key, 0, sizeof(ctx->trusted_key));
+        ctx->trusted_key_set = 0;
+        return ZHL_OK;
+    }
+    uint8_t key[32];
+    if (strlen(pubkey_hex) != 64 ||
+        zcio_hex_decode(pubkey_hex, key, sizeof(key)) != 32) {
+        return ZHL_ERR_INVALID_KEY;
+    }
+    memcpy(ctx->trusted_key, key, sizeof(key));
+    ctx->trusted_key_set = 1;
+    return ZHL_OK;
 }
 
 zhl_status_t zhl_register_bindings(zhl_ctx_t          ctx,

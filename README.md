@@ -231,10 +231,53 @@ const zhl_export_table_t zhl_export_table = {
 ## Running the Update Server
 
 ```sh
-./build/zhs/zhs --data ./data --port 8080
+./build/zhs/zhs --data ./data --port 8080 [--host localhost]
 ```
 
+The `/latest` scan is per-request, so dropping `{data}/{app}/{version}/artifact.so`
+into the tree publishes it immediately (watch-dir ingestion). `--host` scopes
+the listener to one interface (default: all).
+
 See `zhs/README.md` for the data directory layout and how to register applications.
+
+## Signed Artifacts
+
+Artifacts can (and should) be Ed25519-signed; verification is built into both
+ends with no OpenSSL dependency (zcio/crypto.h), so mobile clients verify too:
+
+```sh
+zhs keygen update.key                      # writes update.key (seed, 0600) + update.key.pub
+zhs sign update.key data/myapp/1.2.0/libmyapp.so   # writes libmyapp.so.sig
+```
+
+`GET /apps/{app}/latest` then reports `checksum` (SHA-256) and `signature`
+(Ed25519 over the artifact bytes). On the client, pin the public key:
+
+```c
+zhl_ctx_set_trusted_key(ctx, "f03afe6d...");   /* 64 hex chars */
+```
+
+Once pinned, `zhl_download_update()` REQUIRES a valid signature — a missing
+one fails with `ZHL_ERR_UNSIGNED`, a bad one with `ZHL_ERR_SIGNATURE_INVALID`,
+and the staged file is deleted. Without a pinned key the legacy behavior
+applies (checksum enforced when present).
+
+## Running zhs as a Self-Updating Service
+
+```sh
+zhs install-service --data /srv/zhs-data --port 8080 \
+    --watch-self zhs --trust-key @update.key.pub
+```
+
+Writes a launchd agent (macOS, `KeepAlive`) or systemd user unit (Linux,
+`Restart=always`) and prints the load command. With `--watch-self APP
+--trust-key K`, zhs checks `{data}/{APP}` between poll iterations: when a
+newer version than the running build carries a file named `zhs` whose
+`zhs.sig` verifies against the trusted key, the running binary is atomically
+replaced (write sibling + rename) and the process exits 0 — the service
+manager restarts it on the new version. Self-update is never unsigned; the
+trust key is inlined into the service file so no key file is needed at
+runtime.
 
 ## Dependencies
 

@@ -75,9 +75,12 @@ if(ZHL_HTTP_BACKEND STREQUAL "apple")
 elseif(ZHL_HTTP_BACKEND STREQUAL "android")
     # No link step: JNI calls dispatch through the JavaVM/JNIEnv function tables,
     # and <jni.h> ships in the NDK sysroot, so the backend needs no import library.
-else()
-    target_link_libraries(zhl PRIVATE zcio)
 endif()
+
+# zcio is linked on EVERY platform, not just the zcio HTTP backend: artifact
+# verification uses zcio/crypto.h (SHA-256 + Ed25519), which is dependency-free
+# — mobile builds compile it without OpenSSL or any platform TLS.
+target_link_libraries(zhl PRIVATE zcio)
 
 target_include_directories(zhl
     PRIVATE
