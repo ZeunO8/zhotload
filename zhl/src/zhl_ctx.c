@@ -119,6 +119,7 @@ void zhl_ctx_destroy(zhl_ctx_t *ctx)
     free(c->current_version);
     free(c->current_lib_path);
     free(c->staging_dir);
+    free(c->platform);
     free(c);
     *ctx = NULL;
 }
@@ -183,6 +184,17 @@ zhl_status_t zhl_ctx_set_staging_dir(zhl_ctx_t ctx, const char *path)
     if (!path) return ZHL_ERR_NULL_PARAM;
     if (path[0] == '\0') return ZHL_ERR_EMPTY_STRING;
     return zhl_set_str(&ctx->staging_dir, path);
+}
+
+zhl_status_t zhl_ctx_set_platform(zhl_ctx_t ctx, const char *platform)
+{
+    if (!ctx) return ZHL_ERR_NULL_PARAM;
+    if (!platform || platform[0] == '\0') {
+        free(ctx->platform);
+        ctx->platform = NULL;
+        return ZHL_OK;
+    }
+    return zhl_set_str(&ctx->platform, platform);
 }
 
 zhl_status_t zhl_ctx_set_trusted_key(zhl_ctx_t ctx, const char *pubkey_hex)

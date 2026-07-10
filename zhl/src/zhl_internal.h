@@ -28,6 +28,7 @@ struct zhl_ctx_impl {
     char    *current_version;
     char    *current_lib_path;
     char    *staging_dir;
+    char    *platform;   /* optional; "" -> update checks omit ?platform= */
     uint32_t poll_interval;
 
     zhl_func_binding_t *bindings;

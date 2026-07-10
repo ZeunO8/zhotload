@@ -274,6 +274,20 @@ zhl_status_t zhl_ctx_set_current_lib_path(zhl_ctx_t ctx, const char *path);
 zhl_status_t zhl_ctx_set_staging_dir(zhl_ctx_t ctx, const char *path);
 
 /**
+ * Set the platform identifier sent as ?platform= on update checks (e.g.
+ * "android-arm64", "ios", "macos"). Servers that publish per-platform
+ * builds (zhs's --watch-local-git-config) use this to pick the matching
+ * artifact; servers that don't recognize it, or don't have a build for it,
+ * fall back to their default/flat artifact — safe to always set this to
+ * whatever the running platform actually is.
+ *
+ * @param platform  Platform identifier, or NULL/"" to stop sending one
+ *                  (the default — matches pre-platform-aware servers).
+ * @return ZHL_OK, ZHL_ERR_NULL_PARAM.
+ */
+zhl_status_t zhl_ctx_set_platform(zhl_ctx_t ctx, const char *platform);
+
+/**
  * Pin the Ed25519 public key that artifacts must be signed with.
  *
  * @param pubkey_hex  64 hex characters (32-byte key), or NULL to clear.

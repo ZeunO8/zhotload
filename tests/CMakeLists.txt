@@ -105,4 +105,32 @@ if(TARGET zhs AND NOT WIN32 AND NOT CMAKE_CROSSCOMPILING)
     add_test(NAME test_ingest COMMAND test_ingest WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
     set_tests_properties(test_ingest PROPERTIES TIMEOUT 30)
     add_dependencies(test_ingest zhs)
+
+    # --watch-local-git-config: real git repos + a real (tiny) cmake build,
+    # spawning zhs the same way test_ingest does. Also needs `git` and
+    # `cmake` on PATH -- both are already hard build-time requirements of
+    # this whole project, so no separate find_program guard.
+    add_executable(test_local_watch test_local_watch.c)
+    zhl_compile_options(test_local_watch)
+    target_link_libraries(test_local_watch PRIVATE zcio)
+    target_compile_definitions(test_local_watch PRIVATE ZHS_EXE_PATH="$<TARGET_FILE:zhs>")
+    add_test(NAME test_local_watch COMMAND test_local_watch WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    # Two real cmake configure+build cycles (signed + unsigned watches) plus
+    # a third on the incremental-rebuild/second-tag pass -- generous on a
+    # loaded CI box.
+    set_tests_properties(test_local_watch PROPERTIES TIMEOUT 180)
+    add_dependencies(test_local_watch zhs)
+
+    # ?platform= qualified serving + flat-layout fallback: talks real HTTP
+    # to a zhs subprocess serving a hand-populated data tree (no --ingest or
+    # --watch-local-git-config machinery involved -- this is purely C4's
+    # request-routing logic).
+    add_executable(test_platform_serving test_platform_serving.c)
+    zhl_compile_options(test_platform_serving)
+    target_link_libraries(test_platform_serving PRIVATE zcio cjson)
+    target_include_directories(test_platform_serving PRIVATE ${cjson_SOURCE_DIR})
+    target_compile_definitions(test_platform_serving PRIVATE ZHS_EXE_PATH="$<TARGET_FILE:zhs>")
+    add_test(NAME test_platform_serving COMMAND test_platform_serving WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    set_tests_properties(test_platform_serving PROPERTIES TIMEOUT 30)
+    add_dependencies(test_platform_serving zhs)
 endif()

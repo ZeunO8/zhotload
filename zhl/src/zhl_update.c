@@ -21,8 +21,14 @@ zhl_status_t zhl_check_for_update(zhl_ctx_t ctx, zhl_update_info_t *out)
     memset(out, 0, sizeof(*out));
 
     char url[ZHL_MAX_URL_LEN];
-    int n = snprintf(url, sizeof(url), "%s/apps/%s/latest",
+    int n;
+    if (ctx->platform && ctx->platform[0]) {
+        n = snprintf(url, sizeof(url), "%s/apps/%s/latest?platform=%s",
+                     ctx->server_url, ctx->app_name, ctx->platform);
+    } else {
+        n = snprintf(url, sizeof(url), "%s/apps/%s/latest",
                      ctx->server_url, ctx->app_name);
+    }
     if (n < 0 || (size_t)n >= sizeof(url)) return ZHL_ERR_INVALID_URL;
 
     zhl_http_response_t resp = {0};

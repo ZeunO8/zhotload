@@ -7,18 +7,24 @@
  * OpenSSL dependency).
  *
  * Endpoints:
- *   GET /apps/{app_name}/latest
+ *   GET /apps/{app_name}/latest[?platform=P]
  *       -> JSON: { "version", "download_url", "checksum", "signature" }
  *          checksum  = SHA-256 hex of the artifact bytes
  *          signature = Ed25519 hex from "{artifact}.sig" ("" when unsigned)
  *
- *   GET /apps/{app_name}/download/{version}
+ *   GET /apps/{app_name}/download/{version}[?platform=P]
  *       -> Raw binary artifact.
  *
  * Data layout:
- *   {data_root}/{app_name}/{version}/artifact.{so|dylib|dll}[.sig]
- *   The /latest scan is per-request, so dropping a new version directory into
- *   the tree publishes it immediately (watch-dir ingestion).
+ *   {data_root}/{app_name}/{version}/artifact.{so|dylib|dll}[.sig]         (flat)
+ *   {data_root}/{app_name}/{version}/{platform}/artifact.{so|dylib|dll}[.sig]  (qualified)
+ *   The /latest and /download scans are per-request, so dropping a new
+ *   version directory into the tree publishes it immediately (watch-dir
+ *   ingestion). ?platform=P is checked first, under the qualified layout;
+ *   absent, unrecognized, or with no matching build, requests fall back to
+ *   the flat layout unqualified — old clients and existing publishers
+ *   (hand-dropped, remote --ingest) keep working unmodified. See
+ *   --watch-local-git-config below for what populates the qualified layout.
  *
  * Publisher tooling (subcommands):
  *   zhs keygen <keyfile>            Generate an Ed25519 keypair: <keyfile>
@@ -53,10 +59,30 @@
  *       entry per app. Test override: env ZHS_GITHUB_API_BASE replaces
  *       "https://api.github.com" (points the poller at a mock server).
  *
+ * Git-tag (local) watch + host build:
+ *   --watch-local-git-config FILE.json
+ *       On a dedicated background thread (POSIX only — builds can take
+ *       minutes, and the HTTP endpoints must stay responsive throughout),
+ *       polls one or more local git repos (FILE.json's "watches" array) for
+ *       a tag newer than what's currently published. On one, checks the tag
+ *       out into a persistent, isolated git worktree (never touches the
+ *       watched repo's own working tree) and runs the HOST's own `cmake` to
+ *       configure+build each configured target — e.g. a plain host build
+ *       and a cross-compiled Android build via a toolchain file — signing
+ *       with the watch's "sign_key" when set. Published under the
+ *       platform-qualified layout above. See local_watch.h for the config
+ *       schema. This is the "local checkout" counterpart to --ingest above:
+ *       --ingest fetches artifacts CI already built and published as GitHub
+ *       Release assets; --watch-local-git-config builds them itself from a
+ *       tag it can see directly, for setups with no separate CI.
+ *
  * HTTP server: zcio's hardened HTTP/1.1 server (zcio/http_server.h). The
  * handler runs synchronously inside the poll loop; both endpoints are
  * filesystem reads, well within "keep it short".
  */
+
+#include "common.h"
+#include "local_watch.h"
 
 #include <zcio/http.h>
 #include <zcio/http_server.h>
@@ -93,191 +119,6 @@
 static char g_data_root[512] = DEFAULT_DATA_ROOT;
 
 /* ------------------------------------------------------------------ */
-/*  Version comparison for finding the latest version                  */
-/* ------------------------------------------------------------------ */
-
-/* Parse 3- or 4-plane versions (major.minor.patch[.tweak]); the tweak plane is
- * optional and defaults to 0. Mirrors zhl_version_parse on the client so the
- * server and clients agree on ordering (including tweak-only bumps). */
-static int parse_semver(const char *s, unsigned int *major, unsigned int *minor,
-                        unsigned int *patch, unsigned int *tweak)
-{
-    *tweak = 0;
-    int n = sscanf(s, "%u.%u.%u.%u", major, minor, patch, tweak);
-    return n >= 3;
-}
-
-static int semver_cmp(const char *a, const char *b)
-{
-    unsigned int a_maj, a_min, a_pat, a_twk, b_maj, b_min, b_pat, b_twk;
-    if (!parse_semver(a, &a_maj, &a_min, &a_pat, &a_twk)) return 0;
-    if (!parse_semver(b, &b_maj, &b_min, &b_pat, &b_twk)) return 0;
-
-    if (a_maj != b_maj) return (a_maj > b_maj) ? 1 : -1;
-    if (a_min != b_min) return (a_min > b_min) ? 1 : -1;
-    if (a_pat != b_pat) return (a_pat > b_pat) ? 1 : -1;
-    if (a_twk != b_twk) return (a_twk > b_twk) ? 1 : -1;
-    return 0;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Directory scanning helpers                                         */
-/* ------------------------------------------------------------------ */
-
-static int is_version_dir(const char *name)
-{
-    unsigned int maj, min, pat, twk;
-    return parse_semver(name, &maj, &min, &pat, &twk) && name[0] != '.';
-}
-
-static int find_latest_version(const char *app_dir, char *out, size_t out_len)
-{
-    char latest[64] = {0};
-#if defined(_WIN32)
-    char pattern[600];
-    snprintf(pattern, sizeof(pattern), "%s\\*", app_dir);
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(pattern, &fd);
-    if (h == INVALID_HANDLE_VALUE) return -1;
-    do {
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-        if (!is_version_dir(fd.cFileName)) continue;
-        if (latest[0] == '\0' || semver_cmp(fd.cFileName, latest) > 0)
-            strncpy(latest, fd.cFileName, sizeof(latest) - 1);
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
-#else
-    DIR *d = opendir(app_dir);
-    if (!d) return -1;
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (!is_version_dir(ent->d_name)) continue;
-        if (latest[0] == '\0' || semver_cmp(ent->d_name, latest) > 0) {
-            strncpy(latest, ent->d_name, sizeof(latest) - 1);
-        }
-    }
-    closedir(d);
-#endif
-    if (latest[0] == '\0') return -1;
-    strncpy(out, latest, out_len - 1);
-    out[out_len - 1] = '\0';
-    return 0;
-}
-
-/* Find a file in version_dir whose name ends with one of `exts` (NULL-
- * terminated list). Returns 0 and the full path in `out`, or -1. */
-static int find_file_with_ext(const char *version_dir, const char **exts,
-                              char *out, size_t out_len)
-{
-#if defined(_WIN32)
-    char pattern[900];
-    snprintf(pattern, sizeof(pattern), "%s\\*", version_dir);
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(pattern, &fd);
-    if (h == INVALID_HANDLE_VALUE) return -1;
-    do {
-        const char *name = fd.cFileName;
-        size_t len = strlen(name);
-        for (const char **e = exts; *e; e++) {
-            size_t el = strlen(*e);
-            if (len > el && strcmp(name + len - el, *e) == 0) {
-                snprintf(out, out_len, "%s/%s", version_dir, name);
-                FindClose(h);
-                return 0;
-            }
-        }
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
-    return -1;
-#else
-    DIR *d = opendir(version_dir);
-    if (!d) return -1;
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        const char *name = ent->d_name;
-        size_t len = strlen(name);
-        for (const char **e = exts; *e; e++) {
-            size_t el = strlen(*e);
-            if (len > el && strcmp(name + len - el, *e) == 0) {
-                snprintf(out, out_len, "%s/%s", version_dir, name);
-                closedir(d);
-                return 0;
-            }
-        }
-    }
-    closedir(d);
-    return -1;
-#endif
-}
-
-static int find_artifact(const char *version_dir, char *out, size_t out_len)
-{
-    static const char *exts[] = { ".so", ".dylib", ".dll", NULL };
-    return find_file_with_ext(version_dir, exts, out, out_len);
-}
-
-/* ------------------------------------------------------------------ */
-/*  File helpers                                                       */
-/* ------------------------------------------------------------------ */
-
-/* Read a whole file. Returns malloc'd buffer (caller frees) or NULL. */
-static char *read_file(const char *path, size_t *len_out)
-{
-    FILE *fp = fopen(path, "rb");
-    if (!fp) return NULL;
-    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return NULL; }
-    long sz = ftell(fp);
-    if (sz < 0 || fseek(fp, 0, SEEK_SET) != 0) { fclose(fp); return NULL; }
-    char *data = (char *)malloc(sz ? (size_t)sz + 1 : 1);
-    if (!data) { fclose(fp); return NULL; }
-    size_t got = fread(data, 1, (size_t)sz, fp);
-    fclose(fp);
-    if (got != (size_t)sz) { free(data); return NULL; }
-    data[sz] = '\0';
-    if (len_out) *len_out = (size_t)sz;
-    return data;
-}
-
-/* Streaming SHA-256 of a file into `hex` (65 bytes). 0 on success. */
-static int sha256_file_hex(const char *path, char *hex)
-{
-    FILE *fp = fopen(path, "rb");
-    if (!fp) return -1;
-    zcio_sha256_ctx c;
-    zcio_sha256_init(&c);
-    char buf[65536];
-    size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), fp)) > 0)
-        zcio_sha256_update(&c, buf, n);
-    int err = ferror(fp);
-    fclose(fp);
-    if (err) return -1;
-    uint8_t digest[ZCIO_SHA256_LEN];
-    zcio_sha256_final(&c, digest);
-    zcio_hex_encode(digest, sizeof(digest), hex);
-    return 0;
-}
-
-/* Read "{artifact}.sig" (hex text) into sig_hex (cap incl. NUL), trimming
- * trailing whitespace. Returns 0 on success, -1 when absent/invalid. */
-static int read_sig_hex(const char *artifact, char *sig_hex, size_t cap)
-{
-    char path[900];
-    snprintf(path, sizeof(path), "%s.sig", artifact);
-    size_t len = 0;
-    char *data = read_file(path, &len);
-    if (!data) return -1;
-    while (len > 0 && (data[len-1] == '\n' || data[len-1] == '\r' ||
-                       data[len-1] == ' '  || data[len-1] == '\t'))
-        len--;
-    if (len == 0 || len >= cap) { free(data); return -1; }
-    memcpy(sig_hex, data, len);
-    sig_hex[len] = '\0';
-    free(data);
-    return 0;
-}
-
-/* ------------------------------------------------------------------ */
 /*  HTTP handlers                                                      */
 /* ------------------------------------------------------------------ */
 
@@ -296,13 +137,55 @@ static void send_error(zcio_http_req *r, int status, const char *msg)
     send_json(r, status, buf);
 }
 
-static void handle_latest(zcio_http_req *r, const char *app_name)
+/* Pull "key=value" out of a raw query string (zcio_http_req_query()'s "",
+ * "a=1", or "a=1&b=2" form). Not percent-decoded: platform tokens are always
+ * plain identifiers ("android-arm64", "macos", ...), never arbitrary text.
+ * Returns 0 and the value in `out` (cap incl. NUL) when present, else -1. */
+static int extract_query_param(const char *query, const char *key, char *out, size_t cap)
+{
+    if (!query || !query[0]) return -1;
+    size_t klen = strlen(key);
+    const char *p = query;
+    while (p && *p) {
+        if (strncmp(p, key, klen) == 0 && p[klen] == '=') {
+            const char *v = p + klen + 1;
+            const char *end = strchr(v, '&');
+            size_t vlen = end ? (size_t)(end - v) : strlen(v);
+            if (vlen == 0 || vlen >= cap) return -1;
+            memcpy(out, v, vlen);
+            out[vlen] = '\0';
+            return 0;
+        }
+        p = strchr(p, '&');
+        if (p) p++;
+    }
+    return -1;
+}
+
+/* Resolve version_dir/artifact_name for `platform` when it's published under
+ * a platform-qualified subdirectory ({version_dir}/{platform}/{artifact}),
+ * falling back to the flat legacy layout ({version_dir}/{artifact}) other
+ * publishers (hand-dropped, remote --ingest, or a local-watch entry with no
+ * matching platform build) still use. `platform` may be "" (no ?platform=
+ * sent — always the flat layout, so old clients keep working unmodified). */
+static int resolve_artifact(const char *version_dir, const char *platform,
+                            char *out, size_t out_len)
+{
+    if (platform[0]) {
+        char qualified_dir[800];
+        snprintf(qualified_dir, sizeof(qualified_dir), "%s/%s", version_dir, platform);
+        if (zhs_find_artifact(qualified_dir, out, out_len) == 0) return 0;
+    }
+    return zhs_find_artifact(version_dir, out, out_len);
+}
+
+static void handle_latest(zcio_http_req *r, const char *app_name, const char *platform)
 {
     char app_dir[600];
     snprintf(app_dir, sizeof(app_dir), "%s/%s", g_data_root, app_name);
 
     char latest[64];
-    if (find_latest_version(app_dir, latest, sizeof(latest)) != 0) {
+    if (zhs_find_latest_version(app_dir, latest, sizeof(latest)) != 0) {
         send_error(r, 404, "No versions found");
         return;
     }
@@ -310,39 +193,50 @@ static void handle_latest(zcio_http_req *r, const char *app_name)
     char version_dir[700];
     snprintf(version_dir, sizeof(version_dir), "%s/%s", app_dir, latest);
     char artifact[800];
-    if (find_artifact(version_dir, artifact, sizeof(artifact)) != 0) {
+    if (resolve_artifact(version_dir, platform, artifact, sizeof(artifact)) != 0) {
         send_error(r, 404, "Artifact not found");
         return;
     }
 
     char checksum[ZCIO_SHA256_LEN * 2 + 1] = "";
-    if (sha256_file_hex(artifact, checksum) != 0) {
+    if (zhs_sha256_file_hex(artifact, checksum) != 0) {
         send_error(r, 500, "Cannot hash artifact");
         return;
     }
 
     char signature[ZCIO_ED25519_SIG_LEN * 2 + 8] = "";
-    (void)read_sig_hex(artifact, signature, sizeof(signature));
+    (void)zhs_read_sig_hex(artifact, signature, sizeof(signature));
 
-    char json[1024];
-    snprintf(json, sizeof(json),
-             "{\"version\":\"%s\",\"download_url\":\"/apps/%s/download/%s\","
-             "\"checksum\":\"%s\",\"signature\":\"%s\"}",
-             latest, app_name, latest, checksum, signature);
+    /* Carry ?platform= forward into download_url so the client's follow-up
+     * download request resolves the SAME artifact this response was hashed
+     * from, instead of falling back to whatever the flat layout holds. */
+    char json[1152];
+    if (platform[0]) {
+        snprintf(json, sizeof(json),
+                 "{\"version\":\"%s\",\"download_url\":\"/apps/%s/download/%s?platform=%s\","
+                 "\"checksum\":\"%s\",\"signature\":\"%s\"}",
+                 latest, app_name, latest, platform, checksum, signature);
+    } else {
+        snprintf(json, sizeof(json),
+                 "{\"version\":\"%s\",\"download_url\":\"/apps/%s/download/%s\","
+                 "\"checksum\":\"%s\",\"signature\":\"%s\"}",
+                 latest, app_name, latest, checksum, signature);
+    }
 
     send_json(r, 200, json);
 }
 
 static void handle_download(zcio_http_req *r,
                             const char *app_name,
-                            const char *version)
+                            const char *version,
+                            const char *platform)
 {
     char version_dir[700];
     snprintf(version_dir, sizeof(version_dir), "%s/%s/%s",
              g_data_root, app_name, version);
 
     char artifact[800];
-    if (find_artifact(version_dir, artifact, sizeof(artifact)) != 0) {
+    if (resolve_artifact(version_dir, platform, artifact, sizeof(artifact)) != 0) {
         send_error(r, 404, "Artifact not found");
         return;
     }
@@ -350,7 +244,7 @@ static void handle_download(zcio_http_req *r,
     /* Responses go out as one complete zcio_http_respond, so the artifact is
      * read whole into memory. Artifacts are shared libraries — MBs, not GBs. */
     size_t file_size = 0;
-    char *data = read_file(artifact, &file_size);
+    char *data = zhs_read_file(artifact, &file_size);
     if (!data) {
         send_error(r, 500, "Cannot read artifact");
         return;
@@ -377,6 +271,9 @@ static void ev_handler(zcio_http_req *r, void *user)
      * so ".."-style traversal never reaches these routes. */
     const char *uri = zcio_http_req_path(r);
 
+    char platform[32] = {0};
+    (void)extract_query_param(zcio_http_req_query(r), "platform", platform, sizeof(platform));
+
     char app_name[256] = {0};
     char version[64] = {0};
     char tail = 0;
@@ -387,9 +284,9 @@ static void ev_handler(zcio_http_req *r, void *user)
      * %[^/] conversion (count == 1) and misroute to handle_latest. The `%c`
      * tail guard on /latest rejects any trailing characters after "/latest". */
     if (sscanf(uri, "/apps/%255[^/]/download/%63s", app_name, version) == 2) {
-        handle_download(r, app_name, version);
+        handle_download(r, app_name, version, platform);
     } else if (sscanf(uri, "/apps/%255[^/]/latest%c", app_name, &tail) == 1) {
-        handle_latest(r, app_name);
+        handle_latest(r, app_name, platform);
     } else {
         send_error(r, 404, "Not found");
     }
@@ -439,25 +336,6 @@ static int cmd_keygen(int argc, char **argv)
     return 0;
 }
 
-/* Load a 32-byte Ed25519 seed from a keygen-written file and expand it. */
-static int load_signing_key(const char *keyfile,
-                            uint8_t pub[ZCIO_ED25519_PUBKEY_LEN],
-                            uint8_t priv[ZCIO_ED25519_PRIVKEY_LEN])
-{
-    size_t len = 0;
-    char *data = read_file(keyfile, &len);
-    if (!data) return -1;
-    while (len > 0 && (data[len-1] == '\n' || data[len-1] == '\r')) len--;
-    data[len] = '\0';
-    uint8_t seed[ZCIO_ED25519_SEED_LEN];
-    int ok = zcio_hex_decode(data, seed, sizeof(seed)) == ZCIO_ED25519_SEED_LEN;
-    free(data);
-    if (!ok) return -1;
-    zcio_ed25519_keypair_from_seed(pub, priv, seed);
-    memset(seed, 0, sizeof(seed));
-    return 0;
-}
-
 static int cmd_sign(int argc, char **argv)
 {
     if (argc < 2) {
@@ -465,38 +343,19 @@ static int cmd_sign(int argc, char **argv)
         return 2;
     }
     uint8_t pub[ZCIO_ED25519_PUBKEY_LEN], priv[ZCIO_ED25519_PRIVKEY_LEN];
-    if (load_signing_key(argv[0], pub, priv) != 0) {
+    if (zhs_load_signing_key(argv[0], pub, priv) != 0) {
         fprintf(stderr, "zhs sign: cannot load key from %s\n", argv[0]);
         return 1;
     }
 
     int rc = 0;
     for (int i = 1; i < argc; i++) {
-        size_t len = 0;
-        char *data = read_file(argv[i], &len);
-        if (!data) {
-            fprintf(stderr, "zhs sign: cannot read %s\n", argv[i]);
+        if (zhs_sign_file(argv[i], pub, priv) != 0) {
+            fprintf(stderr, "zhs sign: cannot sign %s\n", argv[i]);
             rc = 1;
             continue;
         }
-        uint8_t sig[ZCIO_ED25519_SIG_LEN];
-        zcio_ed25519_sign(sig, data, len, pub, priv);
-        free(data);
-
-        char sig_hex[ZCIO_ED25519_SIG_LEN * 2 + 1];
-        zcio_hex_encode(sig, sizeof(sig), sig_hex);
-
-        char sigfile[900];
-        snprintf(sigfile, sizeof(sigfile), "%s.sig", argv[i]);
-        FILE *fp = fopen(sigfile, "wb");
-        if (!fp) {
-            fprintf(stderr, "zhs sign: cannot write %s\n", sigfile);
-            rc = 1;
-            continue;
-        }
-        fprintf(fp, "%s\n", sig_hex);
-        fclose(fp);
-        printf("%s -> %s\n", argv[i], sigfile);
+        printf("%s -> %s.sig\n", argv[i], argv[i]);
     }
     return rc;
 }
@@ -537,8 +396,8 @@ static int self_update_check(void)
     snprintf(app_dir, sizeof(app_dir), "%s/%s", g_data_root, g_self_app);
 
     char latest[64];
-    if (find_latest_version(app_dir, latest, sizeof(latest)) != 0) return 0;
-    if (semver_cmp(latest, ZHL_VERSION_STRING) <= 0) return 0;
+    if (zhs_find_latest_version(app_dir, latest, sizeof(latest)) != 0) return 0;
+    if (zhs_semver_cmp(latest, ZHL_VERSION_STRING) <= 0) return 0;
 
     char version_dir[800];
     snprintf(version_dir, sizeof(version_dir), "%s/%s", app_dir, latest);
@@ -546,12 +405,12 @@ static int self_update_check(void)
     snprintf(candidate, sizeof(candidate), "%s/zhs", version_dir);
 
     size_t len = 0;
-    char *data = read_file(candidate, &len);
+    char *data = zhs_read_file(candidate, &len);
     if (!data) return 0;   /* no executable artifact in this version dir */
 
     char sig_hex[ZCIO_ED25519_SIG_LEN * 2 + 8];
     uint8_t sig[ZCIO_ED25519_SIG_LEN];
-    if (read_sig_hex(candidate, sig_hex, sizeof(sig_hex)) != 0 ||
+    if (zhs_read_sig_hex(candidate, sig_hex, sizeof(sig_hex)) != 0 ||
         zcio_hex_decode(sig_hex, sig, sizeof(sig)) != ZCIO_ED25519_SIG_LEN ||
         zcio_ed25519_verify(sig, data, len, g_trust_key) != 1) {
         fprintf(stderr, "zhs: self-update %s found but signature invalid/missing — ignored\n",
@@ -605,32 +464,6 @@ static int g_ingest_count = 0;
 static int g_ingest_interval = ZHS_DEFAULT_INGEST_INTERVAL_S;
 
 /* mkdir -p. Best-effort: a pre-existing directory is success. */
-static int mkdir_p(const char *path)
-{
-    char tmp[1024];
-    size_t len = strlen(path);
-    if (len == 0 || len >= sizeof(tmp)) return -1;
-    memcpy(tmp, path, len + 1);
-    if (tmp[len - 1] == '/') tmp[len - 1] = '\0';
-    for (char *p = tmp + 1; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
-#if defined(_WIN32)
-            if (_mkdir(tmp) != 0 && errno != EEXIST) return -1;
-#else
-            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
-#endif
-            *p = '/';
-        }
-    }
-#if defined(_WIN32)
-    if (_mkdir(tmp) != 0 && errno != EEXIST) return -1;
-#else
-    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
-#endif
-    return 0;
-}
-
 /* Parse "APP=OWNER/REPO[:ASSET_SUBSTR]" into *out. Returns 0 on success. */
 static int parse_ingest_arg(const char *arg, ingest_source_t *out)
 {
@@ -729,7 +562,7 @@ static int ingest_check_one(const ingest_source_t *src)
     char tag[64];
     snprintf(tag, sizeof(tag), "%s", tag_src);
     unsigned int maj, min, pat, twk;
-    if (!parse_semver(tag, &maj, &min, &pat, &twk)) {
+    if (!zhs_parse_semver(tag, &maj, &min, &pat, &twk)) {
         fprintf(stderr, "zhs: ingest %s: tag '%s' is not a semver — skipped\n",
                 src->owner_repo, raw_tag);
         cJSON_Delete(root);
@@ -739,8 +572,8 @@ static int ingest_check_one(const ingest_source_t *src)
     char app_dir[700];
     snprintf(app_dir, sizeof(app_dir), "%s/%s", g_data_root, src->app);
     char have[64];
-    if (find_latest_version(app_dir, have, sizeof(have)) == 0 &&
-        semver_cmp(tag, have) <= 0) {
+    if (zhs_find_latest_version(app_dir, have, sizeof(have)) == 0 &&
+        zhs_semver_cmp(tag, have) <= 0) {
         cJSON_Delete(root);
         return 0;   /* already current */
     }
@@ -793,7 +626,7 @@ static int ingest_check_one(const ingest_source_t *src)
 
     char version_dir[800];
     snprintf(version_dir, sizeof(version_dir), "%s/%s", app_dir, tag);
-    if (mkdir_p(version_dir) != 0) {
+    if (zhs_mkdir_p(version_dir) != 0) {
         fprintf(stderr, "zhs: ingest %s: cannot create %s\n", src->owner_repo, version_dir);
         return 0;
     }
@@ -842,7 +675,8 @@ static int cmd_install_service(const char *data_root, int port,
                                const char *host,
                                const char *self_app, const char *trust_key_arg,
                                const ingest_source_t *ingests, int ingest_count,
-                               int ingest_interval)
+                               int ingest_interval,
+                               const char *local_watch_config)
 {
     char exe[1024];
     if (self_exe_path(exe, sizeof(exe)) != 0) {
@@ -895,6 +729,9 @@ static int cmd_install_service(const char *data_root, int port,
     if (ingest_count > 0)
         fprintf(fp, "    <string>--ingest-interval</string><string>%d</string>\n",
                 ingest_interval);
+    if (local_watch_config && local_watch_config[0])
+        fprintf(fp, "    <string>--watch-local-git-config</string><string>%s</string>\n",
+                local_watch_config);
     fprintf(fp,
         "  </array>\n"
         "  <key>RunAtLoad</key><true/>\n"
@@ -928,6 +765,8 @@ static int cmd_install_service(const char *data_root, int port,
         fprintf(fp, " --ingest %s", arg);
     }
     if (ingest_count > 0) fprintf(fp, " --ingest-interval %d", ingest_interval);
+    if (local_watch_config && local_watch_config[0])
+        fprintf(fp, " --watch-local-git-config %s", local_watch_config);
     fprintf(fp,
         "\nRestart=always\nRestartSec=1\n\n"
         "[Install]\nWantedBy=default.target\n");
@@ -938,7 +777,7 @@ static int cmd_install_service(const char *data_root, int port,
     return 0;
 #else
     (void)port; (void)host; (void)self_app; (void)trust_key_arg;
-    (void)ingests; (void)ingest_count; (void)ingest_interval;
+    (void)ingests; (void)ingest_count; (void)ingest_interval; (void)local_watch_config;
     fprintf(stderr, "zhs: install-service is not supported on this platform\n");
     return 1;
 #endif
@@ -965,7 +804,7 @@ static int parse_trust_key(const char *arg)
     const char *hex = arg;
     if (arg[0] == '@') {
         size_t len = 0;
-        char *data = read_file(arg + 1, &len);
+        char *data = zhs_read_file(arg + 1, &len);
         if (!data) { fprintf(stderr, "zhs: cannot read key file %s\n", arg + 1); return -1; }
         while (len > 0 && (data[len-1] == '\n' || data[len-1] == '\r')) len--;
         if (len >= sizeof(hexbuf)) { free(data); return -1; }
@@ -988,11 +827,13 @@ static void usage(void)
     printf("Usage: zhs [--data DIR] [--port PORT] [--host HOST]\n"
            "           [--watch-self APP --trust-key HEX|@FILE [--self-interval SEC]]\n"
            "           [--ingest APP=OWNER/REPO[:ASSET_SUBSTR] ...] [--ingest-interval SEC]\n"
+           "           [--watch-local-git-config FILE.json]\n"
            "       zhs keygen <keyfile>\n"
            "       zhs sign <keyfile> <file>...\n"
            "       zhs install-service [--data DIR] [--port PORT] [--host HOST]\n"
            "                           [--watch-self APP --trust-key HEX|@FILE]\n"
            "                           [--ingest APP=OWNER/REPO[:ASSET_SUBSTR] ...]\n"
+           "                           [--watch-local-git-config FILE.json]\n"
            "  --data DIR        Root directory for app artifacts (default: %s)\n"
            "  --port PORT       HTTP listen port (default: %d)\n"
            "  --host HOST       Interface to bind (default: all; e.g. localhost)\n"
@@ -1007,7 +848,21 @@ static void usage(void)
            "                    asset matching substring S (default: first non-.sig\n"
            "                    asset) into {data}/A/{tag}/, plus a \".sig\" sibling\n"
            "                    asset if the release publishes one. Repeatable.\n"
-           "  --ingest-interval S  Ingestion poll cadence in seconds (default %d)\n",
+           "  --ingest-interval S  Ingestion poll cadence in seconds (default %d)\n"
+           "  --watch-local-git-config FILE.json\n"
+           "                    Poll one or more local git repos (see FILE.json's\n"
+           "                    \"watches\" array) for a newer tag; on one, check the\n"
+           "                    tag out into a persistent isolated worktree and run\n"
+           "                    the HOST's own cmake to build+publish each configured\n"
+           "                    target (e.g. a plain host build and a cross-compiled\n"
+           "                    Android build via a toolchain file), signing with\n"
+           "                    each watch's \"sign_key\" when set. Published under\n"
+           "                    {data}/{app}/{tag}/{platform}/ -- serve the right one\n"
+           "                    to the right client with GET .../latest?platform=X\n"
+           "                    (falls back to the flat layout when platform is\n"
+           "                    omitted or has no matching build). Runs on its own\n"
+           "                    background thread since builds can take minutes; the\n"
+           "                    HTTP endpoints stay responsive throughout. POSIX only.\n",
            DEFAULT_DATA_ROOT, DEFAULT_PORT, DEFAULT_SELF_INTERVAL_S,
            ZHS_DEFAULT_INGEST_INTERVAL_S);
 }
@@ -1022,6 +877,7 @@ int main(int argc, char **argv)
     int  port = DEFAULT_PORT;
     char host[256] = "";
     char trust_key_arg[600] = "";
+    char local_watch_config_path[600] = "";
     int  install = (argc > 1 && strcmp(argv[1], "install-service") == 0);
 
     for (int i = install ? 2 : 1; i < argc; i++) {
@@ -1054,6 +910,8 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--ingest-interval") == 0 && i + 1 < argc) {
             g_ingest_interval = atoi(argv[++i]);
             if (g_ingest_interval < 1) g_ingest_interval = 1;
+        } else if (strcmp(argv[i], "--watch-local-git-config") == 0 && i + 1 < argc) {
+            strncpy(local_watch_config_path, argv[++i], sizeof(local_watch_config_path) - 1);
         } else if (strcmp(argv[i], "--help") == 0) {
             usage();
             return 0;
@@ -1069,7 +927,8 @@ int main(int argc, char **argv)
         }
         return cmd_install_service(g_data_root, port, host,
                                    g_self_app, trust_key_arg,
-                                   g_ingests, g_ingest_count, g_ingest_interval);
+                                   g_ingests, g_ingest_count, g_ingest_interval,
+                                   local_watch_config_path);
     }
 
     if (g_self_app[0]) {
@@ -1079,6 +938,17 @@ int main(int argc, char **argv)
                     "(self-update is never unsigned)\n");
             return 1;
         }
+    }
+
+    zhs_local_watch_config_t local_watch_cfg;
+    int local_watch_armed = 0;
+    if (local_watch_config_path[0]) {
+        if (zhs_local_watch_load_config(local_watch_config_path, &local_watch_cfg) != 0) {
+            fprintf(stderr, "zhs: --watch-local-git-config %s failed to load\n",
+                    local_watch_config_path);
+            return 1;
+        }
+        local_watch_armed = 1;
     }
 
     zcio_http_server_config cfg = {0};
@@ -1103,16 +973,26 @@ int main(int argc, char **argv)
     }
     g_server = s;
 
+    if (local_watch_armed) {
+        char state_root[600];
+        snprintf(state_root, sizeof(state_root), "%s/.local-watch-state", g_data_root);
+        if (zhs_local_watch_start(&local_watch_cfg, g_data_root, state_root) != 0) {
+            fprintf(stderr, "zhs: failed to start local-git-watch thread\n");
+            local_watch_armed = 0;
+        }
+    }
+
     signal(SIGINT, on_signal);
 #ifdef SIGTERM
     signal(SIGTERM, on_signal);
 #endif
 
-    printf("zhs %s listening on http://%s:%d, serving from %s%s%s\n",
+    printf("zhs %s listening on http://%s:%d, serving from %s%s%s%s\n",
            ZHL_VERSION_STRING, host[0] ? host : "0.0.0.0",
            zcio_http_server_port(s), g_data_root,
            g_self_app[0] ? " (self-update armed)" : "",
-           g_ingest_count > 0 ? " (ingestion armed)" : "");
+           g_ingest_count > 0 ? " (ingestion armed)" : "",
+           local_watch_armed ? " (local-git-watch armed)" : "");
 
     /* Event loop with self-update + ingestion checks between iterations.
      * poll() returns ZCIO_ERR_EOF (negative) once a stop() has fully drained. */
@@ -1138,6 +1018,7 @@ int main(int argc, char **argv)
             (void)ingest_check_all();
         }
     }
+    if (local_watch_armed) zhs_local_watch_stop();
     g_server = NULL;
     zcio_http_server_free(s);
 
