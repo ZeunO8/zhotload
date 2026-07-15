@@ -1,7 +1,7 @@
 # 3.21: zcio's own floor — FetchContent-configuring it fails on anything older,
 # so declaring less here would only defer the error.
 cmake_minimum_required(VERSION 3.21)
-project(zhotload VERSION 0.6.0.0 LANGUAGES C)
+project(zhotload VERSION 0.6.1.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -89,7 +89,7 @@ set(ZCIO_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(zcio
     GIT_REPOSITORY https://github.com/ZeunO8/zcio.git
     GIT_SHALLOW TRUE
-    GIT_TAG v1.4.0.0
+    GIT_TAG v1.4.6.0
 )
 message(STATUS "Fetching zcio from GitHub...")
 FetchContent_MakeAvailable(zcio)
